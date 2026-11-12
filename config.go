@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/robfig/cron/v3"
 )
 
 type Target struct {
@@ -38,17 +40,25 @@ func (t *Target) UnmarshalJSON(data []byte) error {
 }
 
 type Config struct {
-	Targets                           []Target `json:"targets"`
-	ScheduleSeconds                   int      `json:"schedule_seconds"`
-	DelayMilliseconds                 int      `json:"delay_milliseconds"`
-	TimeoutMilliseconds               int      `json:"timeout_milliseconds"`
-	PacketsPerPing                    int      `json:"packets_per_ping"`
-	SpeedtestEnabled                  bool     `json:"speedtest_enabled"`
-	SpeedtestProvider                 string   `json:"speedtest_provider"`
-	SpeedtestTermsAccepted            bool     `json:"speedtest_terms_accepted"`
-	SpeedtestCloudflareNoticeAccepted bool     `json:"speedtest_cloudflare_notice_accepted"`
-	SpeedtestIntervalSeconds          int      `json:"speedtest_interval_seconds"`
-	SpeedtestTimeoutSeconds           int      `json:"speedtest_timeout_seconds"`
+	Targets                            []Target `json:"targets"`
+	ScheduleSeconds                    int      `json:"schedule_seconds"`
+	DelayMilliseconds                  int      `json:"delay_milliseconds"`
+	TimeoutMilliseconds                int      `json:"timeout_milliseconds"`
+	PacketsPerPing                     int      `json:"packets_per_ping"`
+	SpeedtestEnabled                   bool     `json:"speedtest_enabled"`
+	SpeedtestProvider                  string   `json:"speedtest_provider"`
+	SpeedtestTermsAccepted             bool     `json:"speedtest_terms_accepted"`
+	SpeedtestCloudflareNoticeAccepted  bool     `json:"speedtest_cloudflare_notice_accepted"`
+	SpeedtestIntervalSeconds           int      `json:"speedtest_interval_seconds"`
+	SpeedtestTimeoutSeconds            int      `json:"speedtest_timeout_seconds"`
+	SpeedtestOoklaEnabled              bool     `json:"speedtest_ookla_enabled"`
+	SpeedtestOoklaIntervalSeconds      int      `json:"speedtest_ookla_interval_seconds"`
+	SpeedtestOoklaCron                 string   `json:"speedtest_ookla_cron"`
+	SpeedtestCloudflareEnabled         bool     `json:"speedtest_cloudflare_enabled"`
+	SpeedtestCloudflareIntervalSeconds int      `json:"speedtest_cloudflare_interval_seconds"`
+	SpeedtestCloudflareCron            string   `json:"speedtest_cloudflare_cron"`
+	CloudflareConcurrentRequests       int      `json:"cloudflare_concurrent_requests"`
+	CloudflareRequestSizeMB            int      `json:"cloudflare_request_size_mb"`
 }
 
 const (
@@ -58,17 +68,21 @@ const (
 
 func defaultConfig() Config {
 	return Config{
-		Targets:                           []Target{{Address: "1.1.1.1", Type: "external"}, {Address: "8.8.8.8", Type: "external"}},
-		ScheduleSeconds:                   1,
-		DelayMilliseconds:                 0,
-		TimeoutMilliseconds:               1000,
-		PacketsPerPing:                    5,
-		SpeedtestEnabled:                  false,
-		SpeedtestProvider:                 speedtestProviderOokla,
-		SpeedtestTermsAccepted:            false,
-		SpeedtestCloudflareNoticeAccepted: false,
-		SpeedtestIntervalSeconds:          1800,
-		SpeedtestTimeoutSeconds:           300,
+		Targets:                            []Target{{Address: "1.1.1.1", Type: "external"}, {Address: "8.8.8.8", Type: "external"}},
+		ScheduleSeconds:                    1,
+		DelayMilliseconds:                  0,
+		TimeoutMilliseconds:                1000,
+		PacketsPerPing:                     5,
+		SpeedtestEnabled:                   false,
+		SpeedtestProvider:                  speedtestProviderOokla,
+		SpeedtestTermsAccepted:             false,
+		SpeedtestCloudflareNoticeAccepted:  false,
+		SpeedtestIntervalSeconds:           1800,
+		SpeedtestTimeoutSeconds:            300,
+		SpeedtestOoklaIntervalSeconds:      1800,
+		SpeedtestCloudflareIntervalSeconds: 1800,
+		CloudflareConcurrentRequests:       4,
+		CloudflareRequestSizeMB:            5,
 	}
 }
 
@@ -89,11 +103,23 @@ func validateConfig(config Config) (Config, error) {
 	if config.SpeedtestIntervalSeconds == 0 {
 		config.SpeedtestIntervalSeconds = defaultConfig().SpeedtestIntervalSeconds
 	}
+	if config.SpeedtestOoklaIntervalSeconds == 0 {
+		config.SpeedtestOoklaIntervalSeconds = defaultConfig().SpeedtestOoklaIntervalSeconds
+	}
+	if config.SpeedtestCloudflareIntervalSeconds == 0 {
+		config.SpeedtestCloudflareIntervalSeconds = defaultConfig().SpeedtestCloudflareIntervalSeconds
+	}
 	if config.SpeedtestTimeoutSeconds == 0 {
 		config.SpeedtestTimeoutSeconds = defaultConfig().SpeedtestTimeoutSeconds
 	}
 	if config.SpeedtestProvider == "" {
 		config.SpeedtestProvider = defaultConfig().SpeedtestProvider
+	}
+	if config.CloudflareConcurrentRequests == 0 {
+		config.CloudflareConcurrentRequests = defaultConfig().CloudflareConcurrentRequests
+	}
+	if config.CloudflareRequestSizeMB == 0 {
+		config.CloudflareRequestSizeMB = defaultConfig().CloudflareRequestSizeMB
 	}
 	if config.SpeedtestProvider != speedtestProviderOokla && config.SpeedtestProvider != speedtestProviderCloudflare {
 		return Config{}, fmt.Errorf("speedtest provider must be %q or %q", speedtestProviderOokla, speedtestProviderCloudflare)
@@ -130,14 +156,42 @@ func validateConfig(config Config) (Config, error) {
 	if config.SpeedtestIntervalSeconds < 300 || config.SpeedtestIntervalSeconds > 604800 {
 		return Config{}, fmt.Errorf("speedtest interval must be between 300 and 604800 seconds")
 	}
+	if config.SpeedtestOoklaIntervalSeconds < 300 || config.SpeedtestOoklaIntervalSeconds > 604800 {
+		return Config{}, fmt.Errorf("Ookla interval must be between 300 and 604800 seconds")
+	}
+	if config.SpeedtestCloudflareIntervalSeconds < 300 || config.SpeedtestCloudflareIntervalSeconds > 604800 {
+		return Config{}, fmt.Errorf("Cloudflare interval must be between 300 and 604800 seconds")
+	}
 	if config.SpeedtestTimeoutSeconds < 30 || config.SpeedtestTimeoutSeconds > 1800 {
 		return Config{}, fmt.Errorf("speedtest timeout must be between 30 and 1800 seconds")
+	}
+	if config.SpeedtestOoklaCron != "" {
+		if _, err := cron.ParseStandard(config.SpeedtestOoklaCron); err != nil {
+			return Config{}, fmt.Errorf("invalid Ookla cron schedule: %w", err)
+		}
+	}
+	if config.SpeedtestCloudflareCron != "" {
+		if _, err := cron.ParseStandard(config.SpeedtestCloudflareCron); err != nil {
+			return Config{}, fmt.Errorf("invalid Cloudflare cron schedule: %w", err)
+		}
+	}
+	if config.CloudflareConcurrentRequests < 1 || config.CloudflareConcurrentRequests > 8 {
+		return Config{}, fmt.Errorf("Cloudflare concurrent requests must be between 1 and 8")
+	}
+	if config.CloudflareRequestSizeMB < 1 || config.CloudflareRequestSizeMB > 50 {
+		return Config{}, fmt.Errorf("Cloudflare request size must be between 1 and 50 MB")
 	}
 	if config.SpeedtestEnabled && !config.speedtestAcknowledged() {
 		if config.SpeedtestProvider == speedtestProviderCloudflare {
 			return Config{}, fmt.Errorf("acknowledge the Cloudflare privacy notice before enabling automatic speedtests")
 		}
 		return Config{}, fmt.Errorf("accept the Ookla Speedtest CLI terms before enabling automatic speedtests")
+	}
+	if config.SpeedtestOoklaEnabled && !config.SpeedtestTermsAccepted {
+		return Config{}, fmt.Errorf("accept the Ookla Speedtest CLI terms before enabling automatic speedtests")
+	}
+	if config.SpeedtestCloudflareEnabled && !config.SpeedtestCloudflareNoticeAccepted {
+		return Config{}, fmt.Errorf("acknowledge the Cloudflare privacy notice before enabling automatic speedtests")
 	}
 	return config, nil
 }
@@ -166,6 +220,18 @@ func loadConfig(path string) (Config, error) {
 	}
 	if _, exists := fields["speedtest_timeout_seconds"]; !exists {
 		config.SpeedtestTimeoutSeconds = defaultConfig().SpeedtestTimeoutSeconds
+	}
+	_, hasOoklaSettings := fields["speedtest_ookla_enabled"]
+	_, hasCloudflareSettings := fields["speedtest_cloudflare_enabled"]
+	if !hasOoklaSettings && !hasCloudflareSettings && config.SpeedtestEnabled {
+		if config.SpeedtestProvider == speedtestProviderCloudflare {
+			config.SpeedtestCloudflareEnabled = true
+			config.SpeedtestCloudflareIntervalSeconds = config.SpeedtestIntervalSeconds
+		} else {
+			config.SpeedtestOoklaEnabled = true
+			config.SpeedtestOoklaIntervalSeconds = config.SpeedtestIntervalSeconds
+		}
+		config.SpeedtestEnabled = false
 	}
 	return validateConfig(config)
 }

@@ -33,6 +33,7 @@ type SpeedtestStatus struct {
 	Provider              string     `json:"provider"`
 	RunningProvider       string     `json:"running_provider,omitempty"`
 	LastRunAt             *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt             *time.Time `json:"next_run_at,omitempty"`
 	DownloadBitsPerSecond float64    `json:"download_bits_per_second,omitempty"`
 	UploadBitsPerSecond   float64    `json:"upload_bits_per_second,omitempty"`
 	LatencyMilliseconds   float64    `json:"latency_milliseconds,omitempty"`
@@ -41,6 +42,7 @@ type SpeedtestStatus struct {
 }
 
 type SpeedtestFunc func(context.Context) (SpeedtestMeasurement, error)
+type CloudflareSpeedtestFunc func(context.Context, int, int) (SpeedtestMeasurement, error)
 
 func runOoklaSpeedtest(ctx context.Context) (SpeedtestMeasurement, error) {
 	command := exec.CommandContext(ctx, "speedtest", "--format=json", "--progress=no", "--accept-license", "--accept-gdpr")
@@ -105,18 +107,30 @@ func validNonnegativeFinite(value float64) bool {
 
 const (
 	cloudflareSpeedtestURL       = "https://speed.cloudflare.com"
-	cloudflareTransferBytes      = int64(5_000_000)
-	cloudflareTransferParallel   = 4
+	cloudflareTransferBytesPerMB = int64(1_000_000)
 	cloudflareLatencySampleCount = 5
 )
 
 var cloudflareRequestSequence atomic.Uint64
 
-func runCloudflareSpeedtest(ctx context.Context) (SpeedtestMeasurement, error) {
-	return runCloudflareSpeedtestAt(ctx, http.DefaultClient, cloudflareSpeedtestURL)
+type zeroReader struct{}
+
+func (zeroReader) Read(buffer []byte) (int, error) {
+	clear(buffer)
+	return len(buffer), nil
 }
 
-func runCloudflareSpeedtestAt(ctx context.Context, client *http.Client, baseURL string) (SpeedtestMeasurement, error) {
+func runCloudflareSpeedtest(ctx context.Context, concurrentRequests int, requestSizeMB int) (SpeedtestMeasurement, error) {
+	return runCloudflareSpeedtestAt(ctx, http.DefaultClient, cloudflareSpeedtestURL, concurrentRequests, requestSizeMB)
+}
+
+func runCloudflareSpeedtestAt(ctx context.Context, client *http.Client, baseURL string, concurrentRequests int, requestSizeMB int) (SpeedtestMeasurement, error) {
+	if concurrentRequests < 1 || concurrentRequests > 8 {
+		return SpeedtestMeasurement{}, fmt.Errorf("Cloudflare concurrent requests must be between 1 and 8")
+	}
+	if requestSizeMB < 1 || requestSizeMB > 50 {
+		return SpeedtestMeasurement{}, fmt.Errorf("Cloudflare request size must be between 1 and 50 MB")
+	}
 	latencies := make([]time.Duration, 0, cloudflareLatencySampleCount)
 	for range cloudflareLatencySampleCount {
 		started := time.Now()
@@ -127,11 +141,12 @@ func runCloudflareSpeedtestAt(ctx context.Context, client *http.Client, baseURL 
 	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 
-	downloadBitsPerSecond, err := runCloudflareTransfer(ctx, client, baseURL, http.MethodGet)
+	transferBytes := int64(requestSizeMB) * cloudflareTransferBytesPerMB
+	downloadBitsPerSecond, err := runCloudflareTransfer(ctx, client, baseURL, http.MethodGet, concurrentRequests, transferBytes)
 	if err != nil {
 		return SpeedtestMeasurement{}, fmt.Errorf("Cloudflare download test: %w", err)
 	}
-	uploadBitsPerSecond, err := runCloudflareTransfer(ctx, client, baseURL, http.MethodPost)
+	uploadBitsPerSecond, err := runCloudflareTransfer(ctx, client, baseURL, http.MethodPost, concurrentRequests, transferBytes)
 	if err != nil {
 		return SpeedtestMeasurement{}, fmt.Errorf("Cloudflare upload test: %w", err)
 	}
@@ -142,7 +157,7 @@ func runCloudflareSpeedtestAt(ctx context.Context, client *http.Client, baseURL 
 	}, nil
 }
 
-func runCloudflareTransfer(ctx context.Context, client *http.Client, baseURL string, method string) (float64, error) {
+func runCloudflareTransfer(ctx context.Context, client *http.Client, baseURL string, method string, concurrentRequests int, transferBytes int64) (float64, error) {
 	requestContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -150,10 +165,10 @@ func runCloudflareTransfer(ctx context.Context, client *http.Client, baseURL str
 		bytes int64
 		err   error
 	}
-	results := make(chan transferResult, cloudflareTransferParallel)
+	results := make(chan transferResult, concurrentRequests)
 	var workers sync.WaitGroup
 	started := time.Now()
-	for range cloudflareTransferParallel {
+	for range concurrentRequests {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -161,7 +176,7 @@ func runCloudflareTransfer(ctx context.Context, client *http.Client, baseURL str
 			if method == http.MethodPost {
 				path = "/__up"
 			}
-			transferred, err := cloudflareRequestBytes(requestContext, client, method, baseURL, path, cloudflareTransferBytes)
+			transferred, err := cloudflareRequestBytes(requestContext, client, method, baseURL, path, transferBytes)
 			if err != nil {
 				cancel()
 			}
@@ -195,8 +210,7 @@ func runCloudflareTransfer(ctx context.Context, client *http.Client, baseURL str
 func cloudflareRequestBytes(ctx context.Context, client *http.Client, method string, baseURL string, path string, byteCount int64) (int64, error) {
 	var body io.Reader
 	if method == http.MethodPost {
-		payload := make([]byte, int(byteCount))
-		body = bytes.NewReader(payload)
+		body = io.LimitReader(zeroReader{}, byteCount)
 	}
 	endpoint, err := cloudflareMeasurementURL(baseURL, path, byteCount)
 	if err != nil {
@@ -205,6 +219,9 @@ func cloudflareRequestBytes(ctx context.Context, client *http.Client, method str
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return 0, err
+	}
+	if method == http.MethodPost {
+		request.ContentLength = byteCount
 	}
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("Cache-Control", "no-cache")

@@ -80,10 +80,10 @@ func TestRunCloudflareSpeedtestAtMeasuresLatencyAndBandwidth(t *testing.T) {
 		switch {
 		case r.URL.Path == "/__down" && r.Method == http.MethodGet && byteCount == 0:
 			latencyRequests.Add(1)
-		case r.URL.Path == "/__down" && r.Method == http.MethodGet && byteCount == cloudflareTransferBytes:
+		case r.URL.Path == "/__down" && r.Method == http.MethodGet && byteCount == cloudflareTransferBytesPerMB:
 			downloadRequests.Add(1)
 			_, _ = io.CopyN(w, strings.NewReader(strings.Repeat("x", int(byteCount))), byteCount)
-		case r.URL.Path == "/__up" && r.Method == http.MethodPost && byteCount == cloudflareTransferBytes:
+		case r.URL.Path == "/__up" && r.Method == http.MethodPost && byteCount == cloudflareTransferBytesPerMB:
 			uploaded, err := io.Copy(io.Discard, r.Body)
 			if err != nil || uploaded != byteCount {
 				http.Error(w, "invalid upload size", http.StatusBadRequest)
@@ -96,7 +96,7 @@ func TestRunCloudflareSpeedtestAtMeasuresLatencyAndBandwidth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	measurement, err := runCloudflareSpeedtestAt(context.Background(), server.Client(), server.URL)
+	measurement, err := runCloudflareSpeedtestAt(context.Background(), server.Client(), server.URL, 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,8 +107,8 @@ func TestRunCloudflareSpeedtestAtMeasuresLatencyAndBandwidth(t *testing.T) {
 		t.Fatalf("Cloudflare packet loss = %v; packet loss is not measured by this provider", measurement.PacketLossPercent)
 	}
 	if latencyRequests.Load() != cloudflareLatencySampleCount ||
-		downloadRequests.Load() != cloudflareTransferParallel ||
-		uploadRequests.Load() != cloudflareTransferParallel {
+		downloadRequests.Load() != 2 ||
+		uploadRequests.Load() != 2 {
 		t.Fatalf("request counts = latency %d, download %d, upload %d",
 			latencyRequests.Load(), downloadRequests.Load(), uploadRequests.Load())
 	}
@@ -119,7 +119,7 @@ func TestRunCloudflareSpeedtestAtReportsHTTPFailures(t *testing.T) {
 		http.Error(w, "unavailable", http.StatusBadGateway)
 	}))
 	defer server.Close()
-	_, err := runCloudflareSpeedtestAt(context.Background(), server.Client(), server.URL)
+	_, err := runCloudflareSpeedtestAt(context.Background(), server.Client(), server.URL, 4, 5)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("Cloudflare speedtest error = %v; want HTTP 502 failure", err)
 	}
@@ -135,8 +135,28 @@ func TestRunCloudflareSpeedtestAtHonorsContextCancellation(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	_, err := runCloudflareSpeedtestAt(ctx, server.Client(), server.URL)
+	_, err := runCloudflareSpeedtestAt(ctx, server.Client(), server.URL, 4, 5)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Cloudflare cancellation error = %v; want context deadline exceeded", err)
+	}
+}
+
+func TestRunCloudflareSpeedtestAtRejectsUnsafeSettings(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		concurrency int
+		sizeMB      int
+	}{
+		{name: "zero concurrency", concurrency: 0, sizeMB: 1},
+		{name: "too many concurrent requests", concurrency: 9, sizeMB: 1},
+		{name: "zero request size", concurrency: 1, sizeMB: 0},
+		{name: "too large request", concurrency: 1, sizeMB: 51},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := runCloudflareSpeedtestAt(context.Background(), http.DefaultClient, cloudflareSpeedtestURL, test.concurrency, test.sizeMB)
+			if err == nil {
+				t.Fatal("Cloudflare speedtest accepted settings outside the supported bounds")
+			}
+		})
 	}
 }

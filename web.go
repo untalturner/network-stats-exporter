@@ -42,38 +42,52 @@ const page = `<!doctype html>
     <button type="submit">Save ping configuration</button>
     <p id="ping-message" role="status"></p>
   </form>
-  <h2>Speedtest configuration</h2>
-  <p class="hint">Select a speedtest provider. Tests consume significant bandwidth; automatic tests are disabled by default.</p>
-  <form id="speedtest-config">
-    <label for="speedtest-provider">Provider</label>
-    <select id="speedtest-provider">
-      <option value="ookla">Ookla Speedtest</option>
-      <option value="cloudflare">Cloudflare edge network</option>
-    </select>
-    <p id="ookla-details" class="hint">Uses Ookla's public server network. Review its <a href="https://www.speedtest.net/about/eula" target="_blank" rel="noopener">EULA</a>, <a href="https://www.speedtest.net/about/terms" target="_blank" rel="noopener">Terms of Use</a>, and <a href="https://www.speedtest.net/about/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
-    <p id="cloudflare-details" class="hint" hidden>Uses Cloudflare's edge network. Test requests share the exporter host's public IP address with Cloudflare and are subject to its <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noopener">Privacy Policy</a>. Each run transfers up to 40 MB.</p>
+  <h2>Latest ping checks</h2>
+  <table><thead><tr><th>Target</th><th>Type</th><th>Status</th><th>Latency</th><th>Jitter</th><th>Packet loss</th></tr></thead><tbody id="results"></tbody></table>
+  <h2>Speedtests</h2>
+  <p class="hint">Configure and schedule each provider independently. Both may run at the same time. Cron expressions use five fields and the server's local timezone. Ookla controls its own test workload; concurrency and transfer-size settings apply only to Cloudflare.</p>
+  <div class="grid">
+    <div><label for="speedtest-timeout">Speedtest timeout (seconds, 30–1800)</label><input id="speedtest-timeout" type="number" min="30" max="1800" required></div>
+  </div>
+  <form id="ookla-config">
+    <h3>Ookla Speedtest</h3>
+    <p class="hint">Uses Ookla's public server network. Review its <a href="https://www.speedtest.net/about/eula" target="_blank" rel="noopener">EULA</a>, <a href="https://www.speedtest.net/about/terms" target="_blank" rel="noopener">Terms of Use</a>, and <a href="https://www.speedtest.net/about/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+    <label><input id="ookla-enabled" type="checkbox"> Enable scheduled Ookla tests</label>
     <div class="grid">
-      <div><label for="speedtest-interval">Automatic speedtest interval (seconds, minimum 300)</label><input id="speedtest-interval" type="number" min="300" max="604800" required></div>
-      <div><label for="speedtest-timeout">Speedtest timeout (seconds, 30–1800)</label><input id="speedtest-timeout" type="number" min="30" max="1800" required></div>
+      <div><label for="ookla-interval">Interval in seconds (300–604800; ignored when cron is set)</label><input id="ookla-interval" type="number" min="300" max="604800" required></div>
+      <div><label for="ookla-cron">Cron schedule (optional, e.g. <code>0 */6 * * *</code>)</label><input id="ookla-cron" type="text" placeholder="Leave blank to use interval"></div>
     </div>
-    <label id="ookla-terms-wrap"><input id="speedtest-terms-accepted" type="checkbox"> I accept Ookla's EULA, Terms of Use, and Privacy Policy for tests run by this exporter</label>
-    <label id="cloudflare-notice-wrap" hidden><input id="speedtest-cloudflare-notice-accepted" type="checkbox"> I understand this test sends requests to Cloudflare and shares the public IP address</label>
-    <label><input id="speedtest-enabled" type="checkbox"> Enable automatic speedtests</label>
-    <button type="submit">Save speedtest configuration</button>
-    <p id="speedtest-config-message" role="status"></p>
+    <label><input id="speedtest-terms-accepted" type="checkbox"> I accept Ookla's EULA, Terms of Use, and Privacy Policy for tests run by this exporter</label>
+    <button type="submit">Save Ookla settings</button>
+    <button id="run-ookla" type="button">Run Ookla now</button>
+    <p id="ookla-message" role="status">Ookla speedtest has not run yet.</p>
+    <p id="ookla-next-run" class="hint" role="status">Automatic schedule disabled.</p>
+  </form>
+  <form id="cloudflare-config">
+    <h3>Cloudflare edge network</h3>
+    <p class="hint">Test requests share the exporter host's public IP address with Cloudflare and are subject to its <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+    <label><input id="cloudflare-enabled" type="checkbox"> Enable scheduled Cloudflare tests</label>
+    <div class="grid">
+      <div><label for="cloudflare-interval">Interval in seconds (300–604800; ignored when cron is set)</label><input id="cloudflare-interval" type="number" min="300" max="604800" required></div>
+      <div><label for="cloudflare-cron">Cron schedule (optional, e.g. <code>15 */6 * * *</code>)</label><input id="cloudflare-cron" type="text" placeholder="Leave blank to use interval"></div>
+      <div><label for="cloudflare-concurrent-requests">Concurrent requests per direction (1–8)</label><input id="cloudflare-concurrent-requests" type="number" min="1" max="8" required></div>
+      <div><label for="cloudflare-request-size-mb">Size per request (MB, 1–50)</label><input id="cloudflare-request-size-mb" type="number" min="1" max="50" required></div>
+    </div>
+    <p id="cloudflare-transfer-estimate" class="hint"></p>
+    <label><input id="speedtest-cloudflare-notice-accepted" type="checkbox"> I understand this test sends requests to Cloudflare and shares the public IP address</label>
+    <button type="submit">Save Cloudflare settings</button>
+    <button id="run-cloudflare" type="button">Run Cloudflare now</button>
+    <p id="cloudflare-message" role="status">Cloudflare speedtest has not run yet.</p>
+    <p id="cloudflare-next-run" class="hint" role="status">Automatic schedule disabled.</p>
   </form>
   <button id="reset-config" type="button">Reset all configurations to defaults</button>
-  <h2>Latest checks</h2>
-  <table><thead><tr><th>Target</th><th>Type</th><th>Status</th><th>Latency</th><th>Jitter</th><th>Packet loss</th></tr></thead><tbody id="results"></tbody></table>
-  <h2>Internet speedtest</h2>
-  <p class="hint">Use the button to run an on-demand speedtest with the saved speedtest configuration.</p>
-  <button id="run-speedtest" type="button">Run speedtest now</button>
-  <p id="speedtest-status" role="status">Speedtest has not run yet.</p>
   <script>
     const pingForm = document.querySelector("#ping-config");
-    const speedtestForm = document.querySelector("#speedtest-config");
+    const ooklaForm = document.querySelector("#ookla-config");
+    const cloudflareForm = document.querySelector("#cloudflare-config");
     const pingMessage = document.querySelector("#ping-message");
-    const speedtestConfigMessage = document.querySelector("#speedtest-config-message");
+    const ooklaMessage = document.querySelector("#ookla-message");
+    const cloudflareMessage = document.querySelector("#cloudflare-message");
     const targetList = document.querySelector("#target-list");
     let currentConfig;
     let configSaveInProgress = false;
@@ -98,22 +112,27 @@ const page = `<!doctype html>
       document.querySelector("#delay").value = config.delay_milliseconds;
       document.querySelector("#timeout").value = config.timeout_milliseconds;
       document.querySelector("#packets").value = config.packets_per_ping;
-      document.querySelector("#speedtest-enabled").checked = config.speedtest_enabled;
-      document.querySelector("#speedtest-provider").value = config.speedtest_provider || "ookla";
+      document.querySelector("#ookla-enabled").checked = config.speedtest_ookla_enabled;
+      document.querySelector("#ookla-interval").value = config.speedtest_ookla_interval_seconds || 1800;
+      document.querySelector("#ookla-cron").value = config.speedtest_ookla_cron || "";
+      document.querySelector("#cloudflare-enabled").checked = config.speedtest_cloudflare_enabled;
+      document.querySelector("#cloudflare-interval").value = config.speedtest_cloudflare_interval_seconds || 1800;
+      document.querySelector("#cloudflare-cron").value = config.speedtest_cloudflare_cron || "";
       document.querySelector("#speedtest-terms-accepted").checked = config.speedtest_terms_accepted;
       document.querySelector("#speedtest-cloudflare-notice-accepted").checked = config.speedtest_cloudflare_notice_accepted;
-      document.querySelector("#speedtest-interval").value = config.speedtest_interval_seconds;
       document.querySelector("#speedtest-timeout").value = config.speedtest_timeout_seconds;
-      updateProviderDetails();
+      document.querySelector("#cloudflare-concurrent-requests").value = config.cloudflare_concurrent_requests || 4;
+      document.querySelector("#cloudflare-request-size-mb").value = config.cloudflare_request_size_mb || 5;
+      updateCloudflareEstimate();
     }
-    function updateProviderDetails() {
-      const cloudflare = document.querySelector("#speedtest-provider").value === "cloudflare";
-      document.querySelector("#ookla-details").hidden = cloudflare;
-      document.querySelector("#ookla-terms-wrap").hidden = cloudflare;
-      document.querySelector("#cloudflare-details").hidden = !cloudflare;
-      document.querySelector("#cloudflare-notice-wrap").hidden = !cloudflare;
+    function updateCloudflareEstimate() {
+      const concurrency = Number(document.querySelector("#cloudflare-concurrent-requests").value) || 0;
+      const sizeMB = Number(document.querySelector("#cloudflare-request-size-mb").value) || 0;
+      document.querySelector("#cloudflare-transfer-estimate").textContent =
+        "Approximate maximum per test: " + (2 * concurrency * sizeMB) + " MB total (download + upload).";
     }
-    document.querySelector("#speedtest-provider").addEventListener("change", updateProviderDetails);
+    document.querySelector("#cloudflare-concurrent-requests").addEventListener("input", updateCloudflareEstimate);
+    document.querySelector("#cloudflare-request-size-mb").addEventListener("input", updateCloudflareEstimate);
     document.querySelector("#add-target").addEventListener("click", () => addTargetRow());
     targetList.addEventListener("click", (event) => {
       if (event.target.closest(".remove-target")) event.target.closest("tr").remove();
@@ -126,7 +145,8 @@ const page = `<!doctype html>
         if (!response.ok) throw new Error(await response.text());
         renderConfig(await response.json());
         pingMessage.textContent = "All configuration reset to defaults and saved.";
-        speedtestConfigMessage.textContent = "Speedtest settings reset to defaults.";
+        ooklaMessage.textContent = "Ookla settings reset to defaults.";
+        cloudflareMessage.textContent = "Cloudflare settings reset to defaults.";
       } catch (error) { pingMessage.textContent = error.message; }
     });
     async function loadConfig() {
@@ -137,7 +157,7 @@ const page = `<!doctype html>
     async function saveConfigurationChanges(changes, statusElement) {
       if (configSaveInProgress) return false;
       configSaveInProgress = true;
-      const buttons = [...pingForm.querySelectorAll("button[type=submit]"), ...speedtestForm.querySelectorAll("button[type=submit]")];
+      const buttons = [...pingForm.querySelectorAll("button[type=submit]"), ...ooklaForm.querySelectorAll("button[type=submit]"), ...cloudflareForm.querySelectorAll("button[type=submit]")];
       buttons.forEach((button) => { button.disabled = true; });
       try {
         const getResponse = await fetch("/api/config");
@@ -172,19 +192,36 @@ const page = `<!doctype html>
         pingMessage.textContent = "Ping configuration saved. It will be used on the next round.";
       }
     });
-    speedtestForm.addEventListener("submit", async (event) => {
+    ooklaForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      speedtestConfigMessage.textContent = "Saving speedtest configuration…";
+      ooklaMessage.textContent = "Saving Ookla settings…";
       const changes = {
-        speedtest_enabled: document.querySelector("#speedtest-enabled").checked,
-        speedtest_provider: document.querySelector("#speedtest-provider").value,
+        speedtest_enabled: false,
+        speedtest_ookla_enabled: document.querySelector("#ookla-enabled").checked,
+        speedtest_ookla_interval_seconds: Number(document.querySelector("#ookla-interval").value),
+        speedtest_ookla_cron: document.querySelector("#ookla-cron").value.trim(),
         speedtest_terms_accepted: document.querySelector("#speedtest-terms-accepted").checked,
-        speedtest_cloudflare_notice_accepted: document.querySelector("#speedtest-cloudflare-notice-accepted").checked,
-        speedtest_interval_seconds: Number(document.querySelector("#speedtest-interval").value),
         speedtest_timeout_seconds: Number(document.querySelector("#speedtest-timeout").value)
       };
-      if (await saveConfigurationChanges(changes, speedtestConfigMessage)) {
-        speedtestConfigMessage.textContent = "Speedtest configuration saved.";
+      if (await saveConfigurationChanges(changes, ooklaMessage)) {
+        ooklaMessage.textContent = "Ookla settings saved.";
+      }
+    });
+    cloudflareForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      cloudflareMessage.textContent = "Saving Cloudflare settings…";
+      const changes = {
+        speedtest_enabled: false,
+        speedtest_cloudflare_enabled: document.querySelector("#cloudflare-enabled").checked,
+        speedtest_cloudflare_interval_seconds: Number(document.querySelector("#cloudflare-interval").value),
+        speedtest_cloudflare_cron: document.querySelector("#cloudflare-cron").value.trim(),
+        speedtest_cloudflare_notice_accepted: document.querySelector("#speedtest-cloudflare-notice-accepted").checked,
+        speedtest_timeout_seconds: Number(document.querySelector("#speedtest-timeout").value),
+        cloudflare_concurrent_requests: Number(document.querySelector("#cloudflare-concurrent-requests").value),
+        cloudflare_request_size_mb: Number(document.querySelector("#cloudflare-request-size-mb").value)
+      };
+      if (await saveConfigurationChanges(changes, cloudflareMessage)) {
+        cloudflareMessage.textContent = "Cloudflare settings saved.";
       }
     });
     async function refreshResults() {
@@ -212,10 +249,22 @@ const page = `<!doctype html>
           + escapeHTML(loss) + "</td></tr>";
       }).join("");
     }
-    function renderSpeedtestStatus(status) {
-      const output = document.querySelector("#speedtest-status");
-      const provider = (status.running ? status.running_provider : status.provider) || currentConfig?.speedtest_provider || "ookla";
+    function renderSpeedtestStatus(provider, status) {
+      const output = provider === "cloudflare" ? cloudflareMessage : ooklaMessage;
+      const button = document.querySelector(provider === "cloudflare" ? "#run-cloudflare" : "#run-ookla");
       const providerName = provider === "cloudflare" ? "Cloudflare" : "Ookla";
+      const nextRunOutput = document.querySelector(provider === "cloudflare" ? "#cloudflare-next-run" : "#ookla-next-run");
+      const enabled = provider === "cloudflare" ? currentConfig.speedtest_cloudflare_enabled : currentConfig.speedtest_ookla_enabled;
+      const cron = provider === "cloudflare" ? currentConfig.speedtest_cloudflare_cron : currentConfig.speedtest_ookla_cron;
+      const scheduleType = cron ? "cron" : "interval";
+      if (!enabled) {
+        nextRunOutput.textContent = "Automatic schedule disabled.";
+      } else if (status.next_run_at) {
+        nextRunOutput.textContent = "Next automatic execution (" + scheduleType + "): "
+          + new Date(status.next_run_at).toLocaleString();
+      } else {
+        nextRunOutput.textContent = "Next automatic execution (" + scheduleType + "): calculating…";
+      }
       if (status.running) {
         output.textContent = providerName + " speedtest running… Ping checks continue independently.";
       } else if (!status.attempted) {
@@ -229,30 +278,35 @@ const page = `<!doctype html>
           + (status.upload_bits_per_second / 1000000).toFixed(2) + " Mbps, latency "
           + status.latency_milliseconds.toFixed(2) + " ms" + loss;
       }
-      document.querySelector("#run-speedtest").disabled = status.running;
+      button.disabled = status.running;
     }
     async function refreshSpeedtestStatus() {
       const response = await fetch("/api/speedtest");
       if (!response.ok) throw new Error("Could not load speedtest status");
-      renderSpeedtestStatus(await response.json());
+      const statuses = await response.json();
+      renderSpeedtestStatus("ookla", statuses.ookla || {});
+      renderSpeedtestStatus("cloudflare", statuses.cloudflare || {});
     }
-    document.querySelector("#run-speedtest").addEventListener("click", async () => {
-      const button = document.querySelector("#run-speedtest");
+    async function runSpeedtest(provider) {
+      const button = document.querySelector(provider === "cloudflare" ? "#run-cloudflare" : "#run-ookla");
+      const output = provider === "cloudflare" ? cloudflareMessage : ooklaMessage;
       button.disabled = true;
-      document.querySelector("#speedtest-status").textContent = "Starting speedtest…";
+      output.textContent = "Starting " + (provider === "cloudflare" ? "Cloudflare" : "Ookla") + " speedtest…";
       try {
-        const response = await fetch("/api/speedtest/run", {method: "POST"});
+        const response = await fetch("/api/speedtest/run?provider=" + provider, {method: "POST"});
         if (!response.ok) throw new Error(await response.text());
-        renderSpeedtestStatus(await response.json());
+        renderSpeedtestStatus(provider, await response.json());
       } catch (error) {
-        document.querySelector("#speedtest-status").textContent = error.message;
+        output.textContent = error.message;
         button.disabled = false;
       }
-    });
+    }
+    document.querySelector("#run-ookla").addEventListener("click", () => runSpeedtest("ookla"));
+    document.querySelector("#run-cloudflare").addEventListener("click", () => runSpeedtest("cloudflare"));
     function escapeHTML(value) { return String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char])); }
     loadConfig().then(() => Promise.all([refreshResults(), refreshSpeedtestStatus()])).catch((error) => { pingMessage.textContent = error.message; });
     setInterval(() => refreshResults().catch((error) => { pingMessage.textContent = error.message; }), 1000);
-    setInterval(() => refreshSpeedtestStatus().catch((error) => { document.querySelector("#speedtest-status").textContent = error.message; }), 1000);
+    setInterval(() => refreshSpeedtestStatus().catch((error) => { ooklaMessage.textContent = error.message; cloudflareMessage.textContent = error.message; }), 1000);
   </script>
 </body>
 </html>`
