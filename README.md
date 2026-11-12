@@ -35,7 +35,7 @@ Set the Grafana dashboard refresh to 1 second for near-live updates. Prometheus 
 
 In the configuration page, add targets by address and assign each a type such as `local` or `external`. Types must start with a letter and contain only letters, numbers, underscores, or hyphens (up to 32 characters). Edit or remove targets in the table, then save the configuration to apply changes. **Reset to defaults** replaces the saved targets and probe settings with the built-in defaults. **Schedule** is the interval in seconds between rounds (default: 1 second); **delay** is the pause between targets (default: 0); **timeout** is the reply wait per packet (default: 1000ms); **packets per ping check** is the number of ICMP echo requests per target (default: 5, allowed: 1–20). Five packets give loss readings in 20% increments. Settings are persisted in the Docker volume.
 
-If saving or resetting fails, the page displays the storage error. The container needs write access to its `/data` mount (including permission to create and rename files); on TrueNAS, check the dataset or volume is mounted read/write and permits writes by the exporter container user.
+At startup the container prepares the configuration directory for its `app` user, then drops root privileges before running the exporter. If saving or resetting fails, the page displays the storage error. On TrueNAS, check that the mounted volume is read/write and that security settings do not force the container to run as a non-root user before this ownership initialization.
 
 The web page and configuration API have no authentication. Keep the exporter on a trusted network and do not expose port 8080 directly to the public internet.
 
