@@ -27,6 +27,9 @@ func TestValidateConfig(t *testing.T) {
 		{name: "schedule out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 0, TimeoutMilliseconds: 1000}, wantErr: true},
 		{name: "timeout out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 99}, wantErr: true},
 		{name: "packet count out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, PacketsPerPing: -1}, wantErr: true},
+		{name: "speedtest interval out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestIntervalSeconds: 299}, wantErr: true},
+		{name: "speedtest timeout out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestTimeoutSeconds: 29}, wantErr: true},
+		{name: "automatic speedtest without terms", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestEnabled: true}, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -64,8 +67,12 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 	if defaults.PacketsPerPing != 5 {
 		t.Fatalf("default packets per ping = %d, want 5", defaults.PacketsPerPing)
 	}
+	if defaults.SpeedtestEnabled || defaults.SpeedtestIntervalSeconds != 1800 || defaults.SpeedtestTimeoutSeconds != 300 || defaults.SpeedtestTermsAccepted {
+		t.Fatalf("default speedtest config = enabled %t, interval %ds, timeout %ds, terms accepted %t; want disabled, 1800s, 300s, and unaccepted",
+			defaults.SpeedtestEnabled, defaults.SpeedtestIntervalSeconds, defaults.SpeedtestTimeoutSeconds, defaults.SpeedtestTermsAccepted)
+	}
 
-	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7}`
+	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7,"speedtest_enabled":true,"speedtest_terms_accepted":true,"speedtest_interval_seconds":3600,"speedtest_timeout_seconds":420}`
 	put := httptest.NewRecorder()
 	app.routes().ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
 	if put.Code != http.StatusOK {
@@ -76,7 +83,9 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if persisted.Targets[0] != (Target{Address: "localhost", Type: "local"}) || persisted.ScheduleSeconds != 15 ||
-		persisted.DelayMilliseconds != 25 || persisted.TimeoutMilliseconds != 500 || persisted.PacketsPerPing != 7 {
+		persisted.DelayMilliseconds != 25 || persisted.TimeoutMilliseconds != 500 || persisted.PacketsPerPing != 7 ||
+		!persisted.SpeedtestEnabled || !persisted.SpeedtestTermsAccepted || persisted.SpeedtestIntervalSeconds != 3600 ||
+		persisted.SpeedtestTimeoutSeconds != 420 {
 		t.Fatalf("persisted configuration = %+v", persisted)
 	}
 }
@@ -88,7 +97,7 @@ func TestConfigResetRestoresAndPersistsDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7}`
+	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7,"speedtest_enabled":true,"speedtest_terms_accepted":true,"speedtest_interval_seconds":3600,"speedtest_timeout_seconds":420}`
 	put := httptest.NewRecorder()
 	app.routes().ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
 	if put.Code != http.StatusOK {
@@ -107,14 +116,18 @@ func TestConfigResetRestoresAndPersistsDefaults(t *testing.T) {
 	want := defaultConfig()
 	if len(response.Targets) != len(want.Targets) || response.Targets[0] != want.Targets[0] ||
 		response.ScheduleSeconds != want.ScheduleSeconds || response.DelayMilliseconds != want.DelayMilliseconds ||
-		response.TimeoutMilliseconds != want.TimeoutMilliseconds || response.PacketsPerPing != want.PacketsPerPing {
+		response.TimeoutMilliseconds != want.TimeoutMilliseconds || response.PacketsPerPing != want.PacketsPerPing ||
+		response.SpeedtestEnabled != want.SpeedtestEnabled || response.SpeedtestTermsAccepted != want.SpeedtestTermsAccepted ||
+		response.SpeedtestIntervalSeconds != want.SpeedtestIntervalSeconds || response.SpeedtestTimeoutSeconds != want.SpeedtestTimeoutSeconds {
 		t.Fatalf("reset response = %+v, want defaults %+v", response, want)
 	}
 	persisted, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.Targets[0] != want.Targets[0] || persisted.ScheduleSeconds != want.ScheduleSeconds {
+	if persisted.Targets[0] != want.Targets[0] || persisted.ScheduleSeconds != want.ScheduleSeconds ||
+		persisted.SpeedtestIntervalSeconds != want.SpeedtestIntervalSeconds ||
+		persisted.SpeedtestTimeoutSeconds != want.SpeedtestTimeoutSeconds {
 		t.Fatalf("persisted reset configuration = %+v, want defaults %+v", persisted, want)
 	}
 }
@@ -155,6 +168,9 @@ func TestLoadConfigDefaultsPacketsForOlderConfig(t *testing.T) {
 	if config.PacketsPerPing != 5 || config.Targets[0].Type != "default" {
 		t.Fatalf("legacy config migrated to packets=%d, target type=%q; want 5 and default", config.PacketsPerPing, config.Targets[0].Type)
 	}
+	if config.SpeedtestEnabled || config.SpeedtestTermsAccepted || config.SpeedtestIntervalSeconds != 1800 || config.SpeedtestTimeoutSeconds != 300 {
+		t.Fatalf("legacy speedtest config migrated to %+v; want automatic tests disabled, 30-minute interval, and 5-minute timeout", config)
+	}
 }
 
 func TestConfigAPIRejectsInvalidAndUnknownFields(t *testing.T) {
@@ -169,6 +185,8 @@ func TestConfigAPIRejectsInvalidAndUnknownFields(t *testing.T) {
 		`{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5,"extra":true}`,
 		`{"targets":[{"address":"localhost","type":"local","extra":true}],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5}`,
 		`{"targets":[{"address":"localhost","type":"bad type"}],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5}`,
+		`{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5,"speedtest_interval_seconds":299}`,
+		`{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5,"speedtest_enabled":true}`,
 	} {
 		response := httptest.NewRecorder()
 		app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
@@ -221,6 +239,165 @@ func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "_total") {
 		t.Error("metrics should not expose cumulative counters")
+	}
+}
+
+func TestSpeedtestAPIStartsAndReportsManualRun(t *testing.T) {
+	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 1)
+	app.mu.Lock()
+	app.config.SpeedtestTimeoutSeconds = 77
+	app.mu.Unlock()
+	observedTimeout := make(chan time.Duration, 1)
+	packetLoss := 0.5
+	app.speedtest = func(ctx context.Context) (SpeedtestMeasurement, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return SpeedtestMeasurement{}, context.DeadlineExceeded
+		}
+		observedTimeout <- time.Until(deadline)
+		started <- struct{}{}
+		return SpeedtestMeasurement{
+			DownloadBitsPerSecond: 100_000_000,
+			UploadBitsPerSecond:   20_000_000,
+			Latency:               12 * time.Millisecond,
+			PacketLossPercent:     &packetLoss,
+		}, nil
+	}
+
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		response := httptest.NewRecorder()
+		app.routes().ServeHTTP(response, httptest.NewRequest(method, "/api/speedtest/run", nil))
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Errorf("run endpoint %s status = %d, want %d", method, response.Code, http.StatusMethodNotAllowed)
+		}
+	}
+	blocked := httptest.NewRecorder()
+	app.routes().ServeHTTP(blocked, httptest.NewRequest(http.MethodPost, "/api/speedtest/run", nil))
+	if blocked.Code != http.StatusForbidden {
+		t.Fatalf("run without term acknowledgement status = %d, want %d", blocked.Code, http.StatusForbidden)
+	}
+
+	app.mu.Lock()
+	app.config.SpeedtestTermsAccepted = true
+	app.mu.Unlock()
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/speedtest/run", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("run status = %d, body = %q", response.Code, response.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("speedtest was not started")
+	}
+	select {
+	case timeout := <-observedTimeout:
+		if timeout < 76*time.Second || timeout > 77*time.Second {
+			t.Errorf("speedtest timeout = %s, want 77 seconds", timeout)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("speedtest did not receive configured timeout")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		app.mu.RLock()
+		finished := !app.speedtestStatus.Running && app.speedtestStatus.Attempted
+		app.mu.RUnlock()
+		if finished {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("speedtest did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	statusResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(statusResponse, httptest.NewRequest(http.MethodGet, "/api/speedtest", nil))
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"success":true`) ||
+		!strings.Contains(statusResponse.Body.String(), `"download_bits_per_second":100000000`) {
+		t.Fatalf("speedtest status response = %d, %s", statusResponse.Code, statusResponse.Body.String())
+	}
+	metrics := httptest.NewRecorder()
+	app.routes().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, expected := range []string{
+		"network_speedtest_success 1",
+		"network_speedtest_download_bits_per_second 1e+08",
+		"network_speedtest_upload_bits_per_second 2e+07",
+		"network_speedtest_latency_seconds 0.012",
+		"network_speedtest_packet_loss_ratio 0.005",
+		"network_speedtest_running 0",
+	} {
+		if !strings.Contains(metrics.Body.String(), expected) {
+			t.Errorf("speedtest metrics missing %q:\n%s", expected, metrics.Body.String())
+		}
+	}
+}
+
+func TestFailedSpeedtestMetricsOmitPreviousMeasurements(t *testing.T) {
+	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedAt := time.Now().UTC()
+	app.speedtestStatus = SpeedtestStatus{Attempted: true, LastRunAt: &completedAt, Error: "test failed"}
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, expected := range []string{
+		"network_speedtest_success 0",
+		"network_speedtest_last_run_timestamp_seconds ",
+	} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Errorf("failed speedtest metrics missing %q:\n%s", expected, response.Body.String())
+		}
+	}
+	for _, stale := range []string{
+		"\nnetwork_speedtest_download_bits_per_second ",
+		"\nnetwork_speedtest_upload_bits_per_second ",
+		"\nnetwork_speedtest_latency_seconds ",
+	} {
+		if strings.Contains(response.Body.String(), stale) {
+			t.Errorf("failed speedtest exposed stale measurement %q:\n%s", stale, response.Body.String())
+		}
+	}
+}
+
+func TestScheduledSpeedtestRunsAtConfiguredInterval(t *testing.T) {
+	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.config.SpeedtestEnabled = true
+	app.config.SpeedtestTermsAccepted = true
+	app.config.SpeedtestIntervalSeconds = 1
+	runs := make(chan struct{}, 1)
+	app.speedtest = func(context.Context) (SpeedtestMeasurement, error) {
+		runs <- struct{}{}
+		return SpeedtestMeasurement{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		app.runScheduledSpeedtests(ctx)
+		close(done)
+	}()
+	select {
+	case <-runs:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("scheduled speedtest did not run")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("speedtest scheduler did not stop after cancellation")
 	}
 }
 
@@ -345,11 +522,17 @@ func TestIndexServesConfigurationPage(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Save configuration") ||
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Save ping configuration") ||
+		!strings.Contains(response.Body.String(), "Save speedtest configuration") ||
+		!strings.Contains(response.Body.String(), `id="ping-config"`) ||
+		!strings.Contains(response.Body.String(), `id="speedtest-config"`) ||
 		!strings.Contains(response.Body.String(), "packets_per_ping") ||
-		!strings.Contains(response.Body.String(), "Reset to defaults") ||
+		!strings.Contains(response.Body.String(), "Reset all configurations to defaults") ||
 		!strings.Contains(response.Body.String(), "network_ping_jitter_seconds") ||
 		!strings.Contains(response.Body.String(), "<th>Jitter</th>") ||
+		!strings.Contains(response.Body.String(), "Run speedtest now") ||
+		!strings.Contains(response.Body.String(), "speedtest_interval_seconds") ||
+		!strings.Contains(response.Body.String(), "speedtest_terms_accepted") ||
 		!strings.Contains(response.Body.String(), "Add target") ||
 		!strings.Contains(response.Body.String(), "remove-target") ||
 		strings.Contains(response.Body.String(), "prometheus_url") ||

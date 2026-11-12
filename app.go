@@ -25,10 +25,13 @@ type ProbeFunc func(context.Context, string, time.Duration, int) ProbeResult
 type App struct {
 	configPath string
 	probe      ProbeFunc
+	speedtest  SpeedtestFunc
 
-	mu      sync.RWMutex
-	config  Config
-	results map[string]ProbeResult
+	mu              sync.RWMutex
+	config          Config
+	results         map[string]ProbeResult
+	speedtestStatus SpeedtestStatus
+	runContext      context.Context
 }
 
 func NewApp(configPath string, probe ProbeFunc) (*App, error) {
@@ -39,8 +42,10 @@ func NewApp(configPath string, probe ProbeFunc) (*App, error) {
 	return &App{
 		configPath: configPath,
 		probe:      probe,
+		speedtest:  runOoklaSpeedtest,
 		config:     config,
 		results:    make(map[string]ProbeResult),
+		runContext: context.Background(),
 	}, nil
 }
 
@@ -49,6 +54,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/", a.handleIndex)
 	mux.HandleFunc("/api/config", a.handleConfig)
 	mux.HandleFunc("/api/config/reset", a.handleConfigReset)
+	mux.HandleFunc("/api/speedtest", a.handleSpeedtestStatus)
+	mux.HandleFunc("/api/speedtest/run", a.handleSpeedtestRun)
 	mux.HandleFunc("/metrics", a.handleMetrics)
 	return mux
 }
@@ -103,6 +110,110 @@ func (a *App) handleConfigReset(w http.ResponseWriter, r *http.Request) {
 	a.saveConfiguration(w, defaultConfig())
 }
 
+func (a *App) handleSpeedtestStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	a.mu.RLock()
+	status := a.speedtestStatus
+	a.mu.RUnlock()
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (a *App) handleSpeedtestRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	a.mu.RLock()
+	termsAccepted := a.config.SpeedtestTermsAccepted
+	a.mu.RUnlock()
+	if !termsAccepted {
+		http.Error(w, "accept the Ookla Speedtest CLI terms in the configuration before running a speedtest", http.StatusForbidden)
+		return
+	}
+	if !a.startSpeedtest(nil) {
+		http.Error(w, "a speedtest is already running", http.StatusConflict)
+		return
+	}
+	a.mu.RLock()
+	status := a.speedtestStatus
+	a.mu.RUnlock()
+	writeJSON(w, http.StatusAccepted, status)
+}
+
+func (a *App) startSpeedtest(ctx context.Context) bool {
+	a.mu.Lock()
+	if a.speedtestStatus.Running {
+		a.mu.Unlock()
+		return false
+	}
+	if ctx == nil {
+		ctx = a.runContext
+	}
+	timeout := time.Duration(a.config.SpeedtestTimeoutSeconds) * time.Second
+	a.speedtestStatus.Running = true
+	speedtest := a.speedtest
+	a.mu.Unlock()
+
+	go func() {
+		testContext, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		measurement, err := speedtest(testContext)
+		completedAt := time.Now().UTC()
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.speedtestStatus.Running = false
+		a.speedtestStatus.Attempted = true
+		a.speedtestStatus.Success = err == nil
+		a.speedtestStatus.LastRunAt = &completedAt
+		a.speedtestStatus.Error = ""
+		a.speedtestStatus.DownloadBitsPerSecond = 0
+		a.speedtestStatus.UploadBitsPerSecond = 0
+		a.speedtestStatus.LatencyMilliseconds = 0
+		a.speedtestStatus.PacketLossPercent = nil
+		if err != nil {
+			a.speedtestStatus.Error = err.Error()
+			return
+		}
+		a.speedtestStatus.DownloadBitsPerSecond = measurement.DownloadBitsPerSecond
+		a.speedtestStatus.UploadBitsPerSecond = measurement.UploadBitsPerSecond
+		a.speedtestStatus.LatencyMilliseconds = float64(measurement.Latency) / float64(time.Millisecond)
+		a.speedtestStatus.PacketLossPercent = measurement.PacketLossPercent
+	}()
+	return true
+}
+
+func (a *App) runScheduledSpeedtests(ctx context.Context) {
+	for {
+		a.mu.RLock()
+		enabled := a.config.SpeedtestEnabled
+		enabled = enabled && a.config.SpeedtestTermsAccepted
+		interval := a.config.SpeedtestIntervalSeconds
+		a.mu.RUnlock()
+		waitFor := time.Second
+		if enabled {
+			waitFor = time.Duration(interval) * time.Second
+		}
+		if !wait(ctx, waitFor) {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		a.mu.RLock()
+		enabled = a.config.SpeedtestEnabled
+		enabled = enabled && a.config.SpeedtestTermsAccepted
+		a.mu.RUnlock()
+		if enabled {
+			a.startSpeedtest(ctx)
+		}
+	}
+}
+
 func (a *App) saveConfiguration(w http.ResponseWriter, config Config) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -126,6 +237,41 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# TYPE network_ping_jitter_seconds gauge")
 	fmt.Fprintln(w, "# HELP network_ping_packet_loss_ratio Fraction of ICMP echo requests lost in the most recent ping check; 1 means no reply.")
 	fmt.Fprintln(w, "# TYPE network_ping_packet_loss_ratio gauge")
+	fmt.Fprintln(w, "# HELP network_speedtest_running Whether an Ookla speedtest is currently running.")
+	fmt.Fprintln(w, "# TYPE network_speedtest_running gauge")
+	fmt.Fprintln(w, "# HELP network_speedtest_success Whether the most recent speedtest succeeded.")
+	fmt.Fprintln(w, "# TYPE network_speedtest_success gauge")
+	fmt.Fprintln(w, "# HELP network_speedtest_download_bits_per_second Download throughput from the most recent successful speedtest.")
+	fmt.Fprintln(w, "# TYPE network_speedtest_download_bits_per_second gauge")
+	fmt.Fprintln(w, "# HELP network_speedtest_upload_bits_per_second Upload throughput from the most recent successful speedtest.")
+	fmt.Fprintln(w, "# TYPE network_speedtest_upload_bits_per_second gauge")
+	fmt.Fprintln(w, "# HELP network_speedtest_latency_seconds Latency from the most recent successful speedtest.")
+	fmt.Fprintln(w, "# TYPE network_speedtest_latency_seconds gauge")
+	fmt.Fprintln(w, "# HELP network_speedtest_packet_loss_ratio Packet loss fraction from the most recent successful speedtest.")
+	fmt.Fprintln(w, "# TYPE network_speedtest_packet_loss_ratio gauge")
+	fmt.Fprintln(w, "# HELP network_speedtest_last_run_timestamp_seconds Unix timestamp of the most recent completed speedtest.")
+	fmt.Fprintln(w, "# TYPE network_speedtest_last_run_timestamp_seconds gauge")
+	if a.speedtestStatus.Running {
+		fmt.Fprintln(w, "network_speedtest_running 1")
+	} else {
+		fmt.Fprintln(w, "network_speedtest_running 0")
+	}
+	if a.speedtestStatus.Attempted {
+		success := 0
+		if a.speedtestStatus.Success {
+			success = 1
+			fmt.Fprintf(w, "network_speedtest_download_bits_per_second %g\n", a.speedtestStatus.DownloadBitsPerSecond)
+			fmt.Fprintf(w, "network_speedtest_upload_bits_per_second %g\n", a.speedtestStatus.UploadBitsPerSecond)
+			fmt.Fprintf(w, "network_speedtest_latency_seconds %g\n", a.speedtestStatus.LatencyMilliseconds/1000)
+			if a.speedtestStatus.PacketLossPercent != nil {
+				fmt.Fprintf(w, "network_speedtest_packet_loss_ratio %g\n", *a.speedtestStatus.PacketLossPercent/100)
+			}
+		}
+		fmt.Fprintf(w, "network_speedtest_success %d\n", success)
+		if a.speedtestStatus.LastRunAt != nil {
+			fmt.Fprintf(w, "network_speedtest_last_run_timestamp_seconds %g\n", float64(a.speedtestStatus.LastRunAt.UnixNano())/float64(time.Second))
+		}
+	}
 	for _, target := range a.config.Targets {
 		labels := `target="` + escapeLabel(target.Address) + `",type="` + escapeLabel(target.Type) + `"`
 		result, ok := a.results[target.Address]
@@ -158,6 +304,10 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *App) run(ctx context.Context) {
+	a.mu.Lock()
+	a.runContext = ctx
+	a.mu.Unlock()
+	go a.runScheduledSpeedtests(ctx)
 	for {
 		a.mu.RLock()
 		config := Config{

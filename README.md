@@ -1,6 +1,6 @@
 # Network Stats Exporter
 
-A web-configurable ICMP ping exporter that exposes the latest latency, reachability, and packet-loss results for Prometheus to scrape.
+A web-configurable network exporter that exposes live ICMP ping and optional Ookla speedtest results for Prometheus to scrape.
 
 ## Run locally or on TrueNAS
 
@@ -31,10 +31,14 @@ Replace the placeholder with the TrueNAS address and published exporter port, th
 - `network_ping_jitter_seconds * 1000` — mean absolute change in RTT between consecutive successful packets in the latest check, in milliseconds. It is omitted if fewer than two consecutive packets reply.
 - `network_ping_packet_loss_ratio * 100` — packet loss percentage for the latest ping check.
 - Every ping metric includes `target` and `type` labels. For example, `avg by (type) (network_ping_duration_seconds)` shows average latest successful latency per target type (in seconds); multiply by `1000` for milliseconds.
+- `network_speedtest_download_bits_per_second` and `network_speedtest_upload_bits_per_second` — latest successful Ookla speedtest throughput.
+- `network_speedtest_latency_seconds` and `network_speedtest_packet_loss_ratio` — latency and packet loss from the latest successful Ookla speedtest; packet loss is omitted if Ookla does not include it.
+- `network_speedtest_success`, `network_speedtest_running`, and `network_speedtest_last_run_timestamp_seconds` — latest speedtest status and completion time. Speedtest metrics have no labels and represent only the latest completed test.
+- To graph throughput in Mbps, query `network_speedtest_download_bits_per_second / 1000000` or `network_speedtest_upload_bits_per_second / 1000000`.
 
 Set the Grafana dashboard refresh to 1 second for near-live updates. Prometheus stores scraped samples as history; the exporter values themselves always represent the latest completed check.
 
-In the configuration page, add targets by address and assign each a type such as `local` or `external`. Types must start with a letter and contain only letters, numbers, underscores, or hyphens (up to 32 characters). Edit or remove targets in the table, then save the configuration to apply changes. **Reset to defaults** replaces the saved targets and probe settings with the built-in defaults. **Schedule** is the interval in seconds between rounds (default: 1 second); **delay** is the pause between targets (default: 0); **timeout** is the reply wait per packet (default: 1000ms); **packets per ping check** is the number of ICMP echo requests per target (default: 5, allowed: 1–20). Five packets give loss readings in 20% increments. Settings are persisted in the Docker volume.
+In the configuration page, ping and speedtest settings are managed in separate sections with independent save buttons. Saving one section preserves the other section's stored settings. Add ping targets by address and assign each a type such as `local` or `external`. Types must start with a letter and contain only letters, numbers, underscores, or hyphens (up to 32 characters). Edit or remove targets in the table, then save the ping configuration to apply changes. **Reset all configurations to defaults** replaces ping and speedtest settings and targets with the built-in defaults. **Schedule** is the interval in seconds between ping rounds (default: 1 second); **delay** is the pause between targets (default: 0); **timeout** is the reply wait per packet (default: 1000ms); **packets per ping check** is the number of ICMP echo requests per target (default: 5, allowed: 1–20). Five packets give loss readings in 20% increments. Speedtests are manual by default; accept Ookla's terms in the speedtest section and save before selecting **Run speedtest now**. Automatic speedtests can be enabled with a separate interval (default: 30 minutes, minimum: 5 minutes); timeout defaults to 5 minutes (allowed: 30 seconds–30 minutes). A speedtest does not pause ping checks and may consume substantial bandwidth. Settings are persisted in the Docker volume.
 
 At startup the container prepares the configuration directory for its `app` user, then drops root privileges before running the exporter. If saving or resetting fails, the page displays the storage error. On TrueNAS, check that the mounted volume is read/write and that security settings do not force the container to run as a non-root user before this ownership initialization.
 
@@ -52,7 +56,7 @@ To run the published image, replace `build: .` and `image: network-stats-exporte
 image: ghcr.io/untalturner/network-stats-exporter:latest
 ```
 
-The image includes its own ping utility and supports Linux amd64 and arm64 hosts.
+The image includes its own ping utility and Ookla Speedtest CLI and supports Linux amd64 and arm64 hosts. The web UI requires acknowledgement of Ookla's EULA, Terms of Use, and Privacy Policy before a test can run. For local builds outside Docker, install the official Ookla Speedtest CLI from <https://www.speedtest.net/apps/cli> and make sure `speedtest` is in `PATH`. Ookla's CLI is restricted to personal, non-commercial use.
 
 ## Test and build without Docker
 

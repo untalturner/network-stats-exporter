@@ -38,20 +38,28 @@ func (t *Target) UnmarshalJSON(data []byte) error {
 }
 
 type Config struct {
-	Targets             []Target `json:"targets"`
-	ScheduleSeconds     int      `json:"schedule_seconds"`
-	DelayMilliseconds   int      `json:"delay_milliseconds"`
-	TimeoutMilliseconds int      `json:"timeout_milliseconds"`
-	PacketsPerPing      int      `json:"packets_per_ping"`
+	Targets                  []Target `json:"targets"`
+	ScheduleSeconds          int      `json:"schedule_seconds"`
+	DelayMilliseconds        int      `json:"delay_milliseconds"`
+	TimeoutMilliseconds      int      `json:"timeout_milliseconds"`
+	PacketsPerPing           int      `json:"packets_per_ping"`
+	SpeedtestEnabled         bool     `json:"speedtest_enabled"`
+	SpeedtestTermsAccepted   bool     `json:"speedtest_terms_accepted"`
+	SpeedtestIntervalSeconds int      `json:"speedtest_interval_seconds"`
+	SpeedtestTimeoutSeconds  int      `json:"speedtest_timeout_seconds"`
 }
 
 func defaultConfig() Config {
 	return Config{
-		Targets:             []Target{{Address: "1.1.1.1", Type: "external"}, {Address: "8.8.8.8", Type: "external"}},
-		ScheduleSeconds:     1,
-		DelayMilliseconds:   0,
-		TimeoutMilliseconds: 1000,
-		PacketsPerPing:      5,
+		Targets:                  []Target{{Address: "1.1.1.1", Type: "external"}, {Address: "8.8.8.8", Type: "external"}},
+		ScheduleSeconds:          1,
+		DelayMilliseconds:        0,
+		TimeoutMilliseconds:      1000,
+		PacketsPerPing:           5,
+		SpeedtestEnabled:         false,
+		SpeedtestTermsAccepted:   false,
+		SpeedtestIntervalSeconds: 1800,
+		SpeedtestTimeoutSeconds:  300,
 	}
 }
 
@@ -61,6 +69,12 @@ var targetTypePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,31}$`)
 func validateConfig(config Config) (Config, error) {
 	if config.PacketsPerPing == 0 {
 		config.PacketsPerPing = defaultConfig().PacketsPerPing
+	}
+	if config.SpeedtestIntervalSeconds == 0 {
+		config.SpeedtestIntervalSeconds = defaultConfig().SpeedtestIntervalSeconds
+	}
+	if config.SpeedtestTimeoutSeconds == 0 {
+		config.SpeedtestTimeoutSeconds = defaultConfig().SpeedtestTimeoutSeconds
 	}
 	if len(config.Targets) == 0 || len(config.Targets) > 50 {
 		return Config{}, fmt.Errorf("provide between 1 and 50 targets")
@@ -91,6 +105,15 @@ func validateConfig(config Config) (Config, error) {
 	if config.PacketsPerPing < 1 || config.PacketsPerPing > 20 {
 		return Config{}, fmt.Errorf("packets per ping must be between 1 and 20")
 	}
+	if config.SpeedtestIntervalSeconds < 300 || config.SpeedtestIntervalSeconds > 604800 {
+		return Config{}, fmt.Errorf("speedtest interval must be between 300 and 604800 seconds")
+	}
+	if config.SpeedtestTimeoutSeconds < 30 || config.SpeedtestTimeoutSeconds > 1800 {
+		return Config{}, fmt.Errorf("speedtest timeout must be between 30 and 1800 seconds")
+	}
+	if config.SpeedtestEnabled && !config.SpeedtestTermsAccepted {
+		return Config{}, fmt.Errorf("accept the Ookla Speedtest CLI terms before enabling automatic speedtests")
+	}
 	return config, nil
 }
 
@@ -112,6 +135,12 @@ func loadConfig(path string) (Config, error) {
 	}
 	if _, exists := fields["packets_per_ping"]; !exists {
 		config.PacketsPerPing = defaultConfig().PacketsPerPing
+	}
+	if _, exists := fields["speedtest_interval_seconds"]; !exists {
+		config.SpeedtestIntervalSeconds = defaultConfig().SpeedtestIntervalSeconds
+	}
+	if _, exists := fields["speedtest_timeout_seconds"]; !exists {
+		config.SpeedtestTimeoutSeconds = defaultConfig().SpeedtestTimeoutSeconds
 	}
 	return validateConfig(config)
 }
