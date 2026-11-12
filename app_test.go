@@ -30,6 +30,9 @@ func TestValidateConfig(t *testing.T) {
 		{name: "speedtest interval out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestIntervalSeconds: 299}, wantErr: true},
 		{name: "speedtest timeout out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestTimeoutSeconds: 29}, wantErr: true},
 		{name: "automatic speedtest without terms", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestEnabled: true}, wantErr: true},
+		{name: "unsupported speedtest provider", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestProvider: "other"}, wantErr: true},
+		{name: "automatic Cloudflare speedtest without notice", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestEnabled: true, SpeedtestProvider: speedtestProviderCloudflare}, wantErr: true},
+		{name: "automatic Cloudflare speedtest with notice", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, SpeedtestEnabled: true, SpeedtestProvider: speedtestProviderCloudflare, SpeedtestCloudflareNoticeAccepted: true}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -67,12 +70,13 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 	if defaults.PacketsPerPing != 5 {
 		t.Fatalf("default packets per ping = %d, want 5", defaults.PacketsPerPing)
 	}
-	if defaults.SpeedtestEnabled || defaults.SpeedtestIntervalSeconds != 1800 || defaults.SpeedtestTimeoutSeconds != 300 || defaults.SpeedtestTermsAccepted {
-		t.Fatalf("default speedtest config = enabled %t, interval %ds, timeout %ds, terms accepted %t; want disabled, 1800s, 300s, and unaccepted",
-			defaults.SpeedtestEnabled, defaults.SpeedtestIntervalSeconds, defaults.SpeedtestTimeoutSeconds, defaults.SpeedtestTermsAccepted)
+	if defaults.SpeedtestEnabled || defaults.SpeedtestProvider != speedtestProviderOokla ||
+		defaults.SpeedtestIntervalSeconds != 1800 || defaults.SpeedtestTimeoutSeconds != 300 ||
+		defaults.SpeedtestTermsAccepted || defaults.SpeedtestCloudflareNoticeAccepted {
+		t.Fatalf("default speedtest config = %+v; want disabled Ookla, 1800s, 300s, and unaccepted notices", defaults)
 	}
 
-	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7,"speedtest_enabled":true,"speedtest_terms_accepted":true,"speedtest_interval_seconds":3600,"speedtest_timeout_seconds":420}`
+	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7,"speedtest_enabled":true,"speedtest_provider":"cloudflare","speedtest_terms_accepted":true,"speedtest_cloudflare_notice_accepted":true,"speedtest_interval_seconds":3600,"speedtest_timeout_seconds":420}`
 	put := httptest.NewRecorder()
 	app.routes().ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
 	if put.Code != http.StatusOK {
@@ -84,7 +88,9 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 	}
 	if persisted.Targets[0] != (Target{Address: "localhost", Type: "local"}) || persisted.ScheduleSeconds != 15 ||
 		persisted.DelayMilliseconds != 25 || persisted.TimeoutMilliseconds != 500 || persisted.PacketsPerPing != 7 ||
-		!persisted.SpeedtestEnabled || !persisted.SpeedtestTermsAccepted || persisted.SpeedtestIntervalSeconds != 3600 ||
+		!persisted.SpeedtestEnabled || persisted.SpeedtestProvider != speedtestProviderCloudflare ||
+		!persisted.SpeedtestTermsAccepted || !persisted.SpeedtestCloudflareNoticeAccepted ||
+		persisted.SpeedtestIntervalSeconds != 3600 ||
 		persisted.SpeedtestTimeoutSeconds != 420 {
 		t.Fatalf("persisted configuration = %+v", persisted)
 	}
@@ -118,6 +124,8 @@ func TestConfigResetRestoresAndPersistsDefaults(t *testing.T) {
 		response.ScheduleSeconds != want.ScheduleSeconds || response.DelayMilliseconds != want.DelayMilliseconds ||
 		response.TimeoutMilliseconds != want.TimeoutMilliseconds || response.PacketsPerPing != want.PacketsPerPing ||
 		response.SpeedtestEnabled != want.SpeedtestEnabled || response.SpeedtestTermsAccepted != want.SpeedtestTermsAccepted ||
+		response.SpeedtestProvider != want.SpeedtestProvider ||
+		response.SpeedtestCloudflareNoticeAccepted != want.SpeedtestCloudflareNoticeAccepted ||
 		response.SpeedtestIntervalSeconds != want.SpeedtestIntervalSeconds || response.SpeedtestTimeoutSeconds != want.SpeedtestTimeoutSeconds {
 		t.Fatalf("reset response = %+v, want defaults %+v", response, want)
 	}
@@ -168,8 +176,10 @@ func TestLoadConfigDefaultsPacketsForOlderConfig(t *testing.T) {
 	if config.PacketsPerPing != 5 || config.Targets[0].Type != "default" {
 		t.Fatalf("legacy config migrated to packets=%d, target type=%q; want 5 and default", config.PacketsPerPing, config.Targets[0].Type)
 	}
-	if config.SpeedtestEnabled || config.SpeedtestTermsAccepted || config.SpeedtestIntervalSeconds != 1800 || config.SpeedtestTimeoutSeconds != 300 {
-		t.Fatalf("legacy speedtest config migrated to %+v; want automatic tests disabled, 30-minute interval, and 5-minute timeout", config)
+	if config.SpeedtestEnabled || config.SpeedtestProvider != speedtestProviderOokla ||
+		config.SpeedtestTermsAccepted || config.SpeedtestCloudflareNoticeAccepted ||
+		config.SpeedtestIntervalSeconds != 1800 || config.SpeedtestTimeoutSeconds != 300 {
+		t.Fatalf("legacy speedtest config migrated to %+v; want disabled Ookla, 30-minute interval, and 5-minute timeout", config)
 	}
 }
 
@@ -331,6 +341,7 @@ func TestSpeedtestAPIStartsAndReportsManualRun(t *testing.T) {
 		"network_speedtest_latency_seconds 0.012",
 		"network_speedtest_packet_loss_ratio 0.005",
 		"network_speedtest_running 0",
+		`network_speedtest_provider_info{provider="ookla"} 1`,
 	} {
 		if !strings.Contains(metrics.Body.String(), expected) {
 			t.Errorf("speedtest metrics missing %q:\n%s", expected, metrics.Body.String())
@@ -373,6 +384,7 @@ func TestScheduledSpeedtestRunsAtConfiguredInterval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	app.config.SpeedtestEnabled = true
 	app.config.SpeedtestTermsAccepted = true
 	app.config.SpeedtestIntervalSeconds = 1
@@ -398,6 +410,58 @@ func TestScheduledSpeedtestRunsAtConfiguredInterval(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("speedtest scheduler did not stop after cancellation")
+	}
+}
+
+func TestCloudflareSpeedtestRequiresNoticeAndUsesSelectedProvider(t *testing.T) {
+	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.config.SpeedtestProvider = speedtestProviderCloudflare
+	started := make(chan struct{}, 1)
+	app.cloudflareSpeedtest = func(context.Context) (SpeedtestMeasurement, error) {
+		started <- struct{}{}
+		return SpeedtestMeasurement{DownloadBitsPerSecond: 50_000_000, UploadBitsPerSecond: 25_000_000, Latency: 20 * time.Millisecond}, nil
+	}
+	blocked := httptest.NewRecorder()
+	app.routes().ServeHTTP(blocked, httptest.NewRequest(http.MethodPost, "/api/speedtest/run", nil))
+	if blocked.Code != http.StatusForbidden || !strings.Contains(blocked.Body.String(), "Cloudflare") {
+		t.Fatalf("unacknowledged Cloudflare run = %d, %q", blocked.Code, blocked.Body.String())
+	}
+
+	app.config.SpeedtestCloudflareNoticeAccepted = true
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/speedtest/run", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("Cloudflare run status = %d, body = %q", response.Code, response.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Cloudflare speedtest runner was not called")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		app.mu.RLock()
+		finished := !app.speedtestStatus.Running && app.speedtestStatus.Attempted
+		app.mu.RUnlock()
+		if finished {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Cloudflare speedtest did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if app.speedtestStatus.Provider != speedtestProviderCloudflare || !app.speedtestStatus.Success {
+		t.Fatalf("Cloudflare speedtest status = %+v", app.speedtestStatus)
+	}
+	metrics := httptest.NewRecorder()
+	app.routes().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metrics.Body.String(), `network_speedtest_provider_info{provider="cloudflare"} 1`) {
+		t.Fatalf("metrics do not identify Cloudflare provider:\n%s", metrics.Body.String())
 	}
 }
 
@@ -533,6 +597,8 @@ func TestIndexServesConfigurationPage(t *testing.T) {
 		!strings.Contains(response.Body.String(), "Run speedtest now") ||
 		!strings.Contains(response.Body.String(), "speedtest_interval_seconds") ||
 		!strings.Contains(response.Body.String(), "speedtest_terms_accepted") ||
+		!strings.Contains(response.Body.String(), "Cloudflare edge network") ||
+		!strings.Contains(response.Body.String(), "speedtest_cloudflare_notice_accepted") ||
 		!strings.Contains(response.Body.String(), "Add target") ||
 		!strings.Contains(response.Body.String(), "remove-target") ||
 		strings.Contains(response.Body.String(), "prometheus_url") ||

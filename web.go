@@ -12,7 +12,7 @@ const page = `<!doctype html>
     h1 { margin-bottom: .3rem; }
     .hint, #message { color: #777; }
     label { display: block; margin-top: 1rem; font-weight: 600; }
-    input, textarea, button { box-sizing: border-box; width: 100%; padding: .65rem; margin-top: .35rem; font: inherit; }
+    input, textarea, button, select { box-sizing: border-box; width: 100%; padding: .65rem; margin-top: .35rem; font: inherit; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
     button { margin-top: 1.25rem; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; margin-top: 2rem; }
@@ -22,6 +22,7 @@ const page = `<!doctype html>
     .actions { white-space: nowrap; }
     .actions button { width: auto; margin: 0 .25rem 0 0; }
     .ok { color: #16813d; } .bad { color: #c33; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
@@ -42,14 +43,22 @@ const page = `<!doctype html>
     <p id="ping-message" role="status"></p>
   </form>
   <h2>Speedtest configuration</h2>
-  <p class="hint">Speedtests use Ookla's public server network and consume significant bandwidth. Automatic tests are disabled by default. Review Ookla's <a href="https://www.speedtest.net/about/eula" target="_blank" rel="noopener">EULA</a>, <a href="https://www.speedtest.net/about/terms" target="_blank" rel="noopener">Terms of Use</a>, and <a href="https://www.speedtest.net/about/privacy" target="_blank" rel="noopener">Privacy Policy</a> before accepting.</p>
+  <p class="hint">Select a speedtest provider. Tests consume significant bandwidth; automatic tests are disabled by default.</p>
   <form id="speedtest-config">
+    <label for="speedtest-provider">Provider</label>
+    <select id="speedtest-provider">
+      <option value="ookla">Ookla Speedtest</option>
+      <option value="cloudflare">Cloudflare edge network</option>
+    </select>
+    <p id="ookla-details" class="hint">Uses Ookla's public server network. Review its <a href="https://www.speedtest.net/about/eula" target="_blank" rel="noopener">EULA</a>, <a href="https://www.speedtest.net/about/terms" target="_blank" rel="noopener">Terms of Use</a>, and <a href="https://www.speedtest.net/about/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+    <p id="cloudflare-details" class="hint" hidden>Uses Cloudflare's edge network. Test requests share the exporter host's public IP address with Cloudflare and are subject to its <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noopener">Privacy Policy</a>. Each run transfers up to 40 MB.</p>
     <div class="grid">
       <div><label for="speedtest-interval">Automatic speedtest interval (seconds, minimum 300)</label><input id="speedtest-interval" type="number" min="300" max="604800" required></div>
       <div><label for="speedtest-timeout">Speedtest timeout (seconds, 30–1800)</label><input id="speedtest-timeout" type="number" min="30" max="1800" required></div>
     </div>
-    <label><input id="speedtest-terms-accepted" type="checkbox"> I accept Ookla's EULA, Terms of Use, and Privacy Policy for tests run by this exporter</label>
-    <label><input id="speedtest-enabled" type="checkbox"> Enable automatic Ookla speedtests</label>
+    <label id="ookla-terms-wrap"><input id="speedtest-terms-accepted" type="checkbox"> I accept Ookla's EULA, Terms of Use, and Privacy Policy for tests run by this exporter</label>
+    <label id="cloudflare-notice-wrap" hidden><input id="speedtest-cloudflare-notice-accepted" type="checkbox"> I understand this test sends requests to Cloudflare and shares the public IP address</label>
+    <label><input id="speedtest-enabled" type="checkbox"> Enable automatic speedtests</label>
     <button type="submit">Save speedtest configuration</button>
     <p id="speedtest-config-message" role="status"></p>
   </form>
@@ -90,10 +99,21 @@ const page = `<!doctype html>
       document.querySelector("#timeout").value = config.timeout_milliseconds;
       document.querySelector("#packets").value = config.packets_per_ping;
       document.querySelector("#speedtest-enabled").checked = config.speedtest_enabled;
+      document.querySelector("#speedtest-provider").value = config.speedtest_provider || "ookla";
       document.querySelector("#speedtest-terms-accepted").checked = config.speedtest_terms_accepted;
+      document.querySelector("#speedtest-cloudflare-notice-accepted").checked = config.speedtest_cloudflare_notice_accepted;
       document.querySelector("#speedtest-interval").value = config.speedtest_interval_seconds;
       document.querySelector("#speedtest-timeout").value = config.speedtest_timeout_seconds;
+      updateProviderDetails();
     }
+    function updateProviderDetails() {
+      const cloudflare = document.querySelector("#speedtest-provider").value === "cloudflare";
+      document.querySelector("#ookla-details").hidden = cloudflare;
+      document.querySelector("#ookla-terms-wrap").hidden = cloudflare;
+      document.querySelector("#cloudflare-details").hidden = !cloudflare;
+      document.querySelector("#cloudflare-notice-wrap").hidden = !cloudflare;
+    }
+    document.querySelector("#speedtest-provider").addEventListener("change", updateProviderDetails);
     document.querySelector("#add-target").addEventListener("click", () => addTargetRow());
     targetList.addEventListener("click", (event) => {
       if (event.target.closest(".remove-target")) event.target.closest("tr").remove();
@@ -157,7 +177,9 @@ const page = `<!doctype html>
       speedtestConfigMessage.textContent = "Saving speedtest configuration…";
       const changes = {
         speedtest_enabled: document.querySelector("#speedtest-enabled").checked,
+        speedtest_provider: document.querySelector("#speedtest-provider").value,
         speedtest_terms_accepted: document.querySelector("#speedtest-terms-accepted").checked,
+        speedtest_cloudflare_notice_accepted: document.querySelector("#speedtest-cloudflare-notice-accepted").checked,
         speedtest_interval_seconds: Number(document.querySelector("#speedtest-interval").value),
         speedtest_timeout_seconds: Number(document.querySelector("#speedtest-timeout").value)
       };
@@ -192,15 +214,17 @@ const page = `<!doctype html>
     }
     function renderSpeedtestStatus(status) {
       const output = document.querySelector("#speedtest-status");
+      const provider = (status.running ? status.running_provider : status.provider) || currentConfig?.speedtest_provider || "ookla";
+      const providerName = provider === "cloudflare" ? "Cloudflare" : "Ookla";
       if (status.running) {
-        output.textContent = "Speedtest running… Ping checks continue independently.";
+        output.textContent = providerName + " speedtest running… Ping checks continue independently.";
       } else if (!status.attempted) {
-        output.textContent = "Speedtest has not run yet.";
+        output.textContent = providerName + " speedtest has not run yet.";
       } else if (!status.success) {
-        output.textContent = "Last speedtest failed (" + new Date(status.last_run_at).toLocaleString() + "): " + status.error;
+        output.textContent = "Last " + providerName + " speedtest failed (" + new Date(status.last_run_at).toLocaleString() + "): " + status.error;
       } else {
         const loss = status.packet_loss_percent == null ? "" : ", packet loss " + status.packet_loss_percent.toFixed(1) + "%";
-        output.textContent = "Last run " + new Date(status.last_run_at).toLocaleString() + ": download "
+        output.textContent = "Last " + providerName + " run " + new Date(status.last_run_at).toLocaleString() + ": download "
           + (status.download_bits_per_second / 1000000).toFixed(2) + " Mbps, upload "
           + (status.upload_bits_per_second / 1000000).toFixed(2) + " Mbps, latency "
           + status.latency_milliseconds.toFixed(2) + " ms" + loss;

@@ -2,9 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,5 +66,77 @@ func TestParseOoklaSpeedtestJSONRejectsInvalidResults(t *testing.T) {
 				t.Fatalf("parseOoklaSpeedtestJSON() error = %v, want an error", err)
 			}
 		})
+	}
+}
+
+func TestRunCloudflareSpeedtestAtMeasuresLatencyAndBandwidth(t *testing.T) {
+	var latencyRequests, downloadRequests, uploadRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		byteCount, err := strconv.ParseInt(r.URL.Query().Get("bytes"), 10, 64)
+		if err != nil {
+			http.Error(w, "missing bytes", http.StatusBadRequest)
+			return
+		}
+		switch {
+		case r.URL.Path == "/__down" && r.Method == http.MethodGet && byteCount == 0:
+			latencyRequests.Add(1)
+		case r.URL.Path == "/__down" && r.Method == http.MethodGet && byteCount == cloudflareTransferBytes:
+			downloadRequests.Add(1)
+			_, _ = io.CopyN(w, strings.NewReader(strings.Repeat("x", int(byteCount))), byteCount)
+		case r.URL.Path == "/__up" && r.Method == http.MethodPost && byteCount == cloudflareTransferBytes:
+			uploaded, err := io.Copy(io.Discard, r.Body)
+			if err != nil || uploaded != byteCount {
+				http.Error(w, "invalid upload size", http.StatusBadRequest)
+				return
+			}
+			uploadRequests.Add(1)
+		default:
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	measurement, err := runCloudflareSpeedtestAt(context.Background(), server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if measurement.DownloadBitsPerSecond <= 0 || measurement.UploadBitsPerSecond <= 0 || measurement.Latency <= 0 {
+		t.Fatalf("Cloudflare measurement = %+v; expected positive latency and throughput", measurement)
+	}
+	if measurement.PacketLossPercent != nil {
+		t.Fatalf("Cloudflare packet loss = %v; packet loss is not measured by this provider", measurement.PacketLossPercent)
+	}
+	if latencyRequests.Load() != cloudflareLatencySampleCount ||
+		downloadRequests.Load() != cloudflareTransferParallel ||
+		uploadRequests.Load() != cloudflareTransferParallel {
+		t.Fatalf("request counts = latency %d, download %d, upload %d",
+			latencyRequests.Load(), downloadRequests.Load(), uploadRequests.Load())
+	}
+}
+
+func TestRunCloudflareSpeedtestAtReportsHTTPFailures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	_, err := runCloudflareSpeedtestAt(context.Background(), server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 502") {
+		t.Fatalf("Cloudflare speedtest error = %v; want HTTP 502 failure", err)
+	}
+}
+
+func TestRunCloudflareSpeedtestAtHonorsContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("bytes") == "0" {
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err := runCloudflareSpeedtestAt(ctx, server.Client(), server.URL)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Cloudflare cancellation error = %v; want context deadline exceeded", err)
 	}
 }

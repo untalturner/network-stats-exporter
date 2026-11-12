@@ -22,10 +22,19 @@ type ProbeResult struct {
 
 type ProbeFunc func(context.Context, string, time.Duration, int) ProbeResult
 
+type speedtestStartResult int
+
+const (
+	speedtestStartSucceeded speedtestStartResult = iota
+	speedtestStartAlreadyRunning
+	speedtestStartAcknowledgementRequired
+)
+
 type App struct {
-	configPath string
-	probe      ProbeFunc
-	speedtest  SpeedtestFunc
+	configPath          string
+	probe               ProbeFunc
+	speedtest           SpeedtestFunc
+	cloudflareSpeedtest SpeedtestFunc
 
 	mu              sync.RWMutex
 	config          Config
@@ -40,12 +49,13 @@ func NewApp(configPath string, probe ProbeFunc) (*App, error) {
 		return nil, err
 	}
 	return &App{
-		configPath: configPath,
-		probe:      probe,
-		speedtest:  runOoklaSpeedtest,
-		config:     config,
-		results:    make(map[string]ProbeResult),
-		runContext: context.Background(),
+		configPath:          configPath,
+		probe:               probe,
+		speedtest:           runOoklaSpeedtest,
+		cloudflareSpeedtest: runCloudflareSpeedtest,
+		config:              config,
+		results:             make(map[string]ProbeResult),
+		runContext:          context.Background(),
 	}, nil
 }
 
@@ -128,14 +138,12 @@ func (a *App) handleSpeedtestRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	a.mu.RLock()
-	termsAccepted := a.config.SpeedtestTermsAccepted
-	a.mu.RUnlock()
-	if !termsAccepted {
-		http.Error(w, "accept the Ookla Speedtest CLI terms in the configuration before running a speedtest", http.StatusForbidden)
+	result, provider := a.startSpeedtest(nil)
+	if result == speedtestStartAcknowledgementRequired {
+		http.Error(w, speedtestAcknowledgementMessage(provider), http.StatusForbidden)
 		return
 	}
-	if !a.startSpeedtest(nil) {
+	if result == speedtestStartAlreadyRunning {
 		http.Error(w, "a speedtest is already running", http.StatusConflict)
 		return
 	}
@@ -145,18 +153,28 @@ func (a *App) handleSpeedtestRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, status)
 }
 
-func (a *App) startSpeedtest(ctx context.Context) bool {
+func (a *App) startSpeedtest(ctx context.Context) (speedtestStartResult, string) {
 	a.mu.Lock()
 	if a.speedtestStatus.Running {
 		a.mu.Unlock()
-		return false
+		return speedtestStartAlreadyRunning, ""
+	}
+	if !a.config.speedtestAcknowledged() {
+		provider := a.config.SpeedtestProvider
+		a.mu.Unlock()
+		return speedtestStartAcknowledgementRequired, provider
 	}
 	if ctx == nil {
 		ctx = a.runContext
 	}
 	timeout := time.Duration(a.config.SpeedtestTimeoutSeconds) * time.Second
-	a.speedtestStatus.Running = true
+	provider := a.config.SpeedtestProvider
 	speedtest := a.speedtest
+	if provider == speedtestProviderCloudflare {
+		speedtest = a.cloudflareSpeedtest
+	}
+	a.speedtestStatus.Running = true
+	a.speedtestStatus.RunningProvider = provider
 	a.mu.Unlock()
 
 	go func() {
@@ -167,8 +185,10 @@ func (a *App) startSpeedtest(ctx context.Context) bool {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		a.speedtestStatus.Running = false
+		a.speedtestStatus.RunningProvider = ""
 		a.speedtestStatus.Attempted = true
 		a.speedtestStatus.Success = err == nil
+		a.speedtestStatus.Provider = provider
 		a.speedtestStatus.LastRunAt = &completedAt
 		a.speedtestStatus.Error = ""
 		a.speedtestStatus.DownloadBitsPerSecond = 0
@@ -184,14 +204,13 @@ func (a *App) startSpeedtest(ctx context.Context) bool {
 		a.speedtestStatus.LatencyMilliseconds = float64(measurement.Latency) / float64(time.Millisecond)
 		a.speedtestStatus.PacketLossPercent = measurement.PacketLossPercent
 	}()
-	return true
+	return speedtestStartSucceeded, provider
 }
 
 func (a *App) runScheduledSpeedtests(ctx context.Context) {
 	for {
 		a.mu.RLock()
-		enabled := a.config.SpeedtestEnabled
-		enabled = enabled && a.config.SpeedtestTermsAccepted
+		enabled := a.config.SpeedtestEnabled && a.config.speedtestAcknowledged()
 		interval := a.config.SpeedtestIntervalSeconds
 		a.mu.RUnlock()
 		waitFor := time.Second
@@ -205,8 +224,7 @@ func (a *App) runScheduledSpeedtests(ctx context.Context) {
 			return
 		}
 		a.mu.RLock()
-		enabled = a.config.SpeedtestEnabled
-		enabled = enabled && a.config.SpeedtestTermsAccepted
+		enabled = a.config.SpeedtestEnabled && a.config.speedtestAcknowledged()
 		a.mu.RUnlock()
 		if enabled {
 			a.startSpeedtest(ctx)
@@ -229,6 +247,13 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	provider := a.speedtestStatus.Provider
+	if provider == "" {
+		provider = a.speedtestStatus.RunningProvider
+	}
+	if provider == "" {
+		provider = a.config.SpeedtestProvider
+	}
 	fmt.Fprintln(w, "# HELP network_ping_success Whether the most recent ICMP ping succeeded.")
 	fmt.Fprintln(w, "# TYPE network_ping_success gauge")
 	fmt.Fprintln(w, "# HELP network_ping_duration_seconds Round-trip latency of the most recent successful ping.")
@@ -237,7 +262,7 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# TYPE network_ping_jitter_seconds gauge")
 	fmt.Fprintln(w, "# HELP network_ping_packet_loss_ratio Fraction of ICMP echo requests lost in the most recent ping check; 1 means no reply.")
 	fmt.Fprintln(w, "# TYPE network_ping_packet_loss_ratio gauge")
-	fmt.Fprintln(w, "# HELP network_speedtest_running Whether an Ookla speedtest is currently running.")
+	fmt.Fprintln(w, "# HELP network_speedtest_running Whether a speedtest is currently running.")
 	fmt.Fprintln(w, "# TYPE network_speedtest_running gauge")
 	fmt.Fprintln(w, "# HELP network_speedtest_success Whether the most recent speedtest succeeded.")
 	fmt.Fprintln(w, "# TYPE network_speedtest_success gauge")
@@ -251,6 +276,9 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# TYPE network_speedtest_packet_loss_ratio gauge")
 	fmt.Fprintln(w, "# HELP network_speedtest_last_run_timestamp_seconds Unix timestamp of the most recent completed speedtest.")
 	fmt.Fprintln(w, "# TYPE network_speedtest_last_run_timestamp_seconds gauge")
+	fmt.Fprintln(w, "# HELP network_speedtest_provider_info Provider used for the most recent speedtest, or the configured provider before the first run.")
+	fmt.Fprintln(w, "# TYPE network_speedtest_provider_info gauge")
+	fmt.Fprintf(w, "network_speedtest_provider_info{provider=%q} 1\n", escapeLabel(provider))
 	if a.speedtestStatus.Running {
 		fmt.Fprintln(w, "network_speedtest_running 1")
 	} else {
@@ -362,4 +390,11 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func escapeLabel(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, "\n", `\n`, `"`, `\"`)
 	return replacer.Replace(value)
+}
+
+func speedtestAcknowledgementMessage(provider string) string {
+	if provider == speedtestProviderCloudflare {
+		return "acknowledge the Cloudflare privacy notice in the configuration before running a speedtest"
+	}
+	return "accept the Ookla Speedtest CLI terms in the configuration before running a speedtest"
 }
