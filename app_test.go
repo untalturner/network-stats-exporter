@@ -81,7 +81,7 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 
 func TestLoadConfigDefaultsPacketsForOlderConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	legacy := `{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000}`
+	legacy := `{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"prometheus_url":"http://old-host:9090","grafana_url":"http://old-host:3000"}`
 	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,9 @@ func TestIndexServesConfigurationPage(t *testing.T) {
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Save configuration") ||
-		!strings.Contains(response.Body.String(), "packets_per_ping") {
+		!strings.Contains(response.Body.String(), "packets_per_ping") ||
+		strings.Contains(response.Body.String(), "prometheus_url") ||
+		strings.Contains(response.Body.String(), "grafana_url") {
 		t.Fatalf("unexpected page response: status=%d body=%q", response.Code, response.Body.String())
 	}
 }

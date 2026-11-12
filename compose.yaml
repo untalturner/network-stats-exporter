@@ -8,28 +8,6 @@ services:
       - exporter-data:/data
     restart: unless-stopped
 
-  prometheus:
-    image: prom/prometheus:v3.5.0
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    depends_on:
-      - network-stats-exporter
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:12.1.1
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
-    depends_on:
-      - prometheus
-    restart: unless-stopped
-
 volumes:
   exporter-data:
-  prometheus-data:
-  grafana-data:
+    name: network-stats-exporter-config

@@ -1,38 +1,40 @@
 # Network Stats Exporter
 
-A small web-configurable ICMP ping exporter. It probes configured IP addresses or hostnames, serves the latest results as Prometheus metrics, and persists settings in a Docker volume.
+A web-configurable ICMP ping exporter that exposes the latest latency, reachability, and packet-loss results for Prometheus to scrape.
 
-## Run locally
+## Run locally or on TrueNAS
 
-Requirements: Docker Desktop (or Docker Engine) and Docker Compose.
+The Compose stack runs **only the exporter**. It does not install or manage Prometheus or Grafana:
 
 ```sh
-docker compose up --build
+docker compose up --build -d
 ```
 
-- Configure ping targets at <http://localhost:8080>.
-- Prometheus is available at <http://localhost:9090>.
-- Grafana is available at <http://localhost:3000> (default login: `admin` / `admin`; Grafana asks you to change the password).
+Open the configuration page at <http://localhost:8080> to set ping targets and probe options.
 
-The page accepts one target per line. **Schedule** is the interval in seconds between rounds (default: 1 second); **delay** is the pause in milliseconds between targets within a round (default: 0); **timeout** is the maximum reply wait in milliseconds per packet (default: 1000); **packets per ping check** is the number of ICMP echo requests sent to each target per round (default: 5, allowed: 1–20). Five packets provide 20% loss increments for each check. On Linux and macOS they are sent 200ms apart. The first round starts as soon as the exporter starts. Settings are saved to the `exporter-data` volume and survive container recreation; existing saved configs receive the default packet count. A changed schedule takes effect after the current round. Probes run serially, so many slow or unreachable targets can make a round take longer than its schedule.
+The Compose file has a persistent named Docker volume, `network-stats-exporter-config`, mounted at `/data`, where the configuration is saved. Restarting or recreating the exporter container keeps the configuration. `docker compose down` also retains it; **do not** use `docker compose down -v` unless you intend to delete the volume and saved configuration. In TrueNAS, keep the app's `/data` volume (or map it to a persistent dataset) when editing/redeploying the app.
 
-In Grafana, add a Prometheus data source with URL `http://prometheus:9090` if it is not already configured, then use Explore to query:
+Publish or map container port `8080` so both you and Prometheus can reach it. In your existing Prometheus configuration, add a scrape job using an address reachable **from the Prometheus server/container**:
+
+```yaml
+scrape_configs:
+  - job_name: network-stats-exporter
+    scrape_interval: 1s
+    static_configs:
+      - targets: ["<TRUENAS-IP-OR-HOSTNAME>:8080"]
+```
+
+Replace the placeholder with the TrueNAS address and published exporter port, then reload/restart Prometheus as appropriate for your setup. Verify in Prometheus that `up{job="network-stats-exporter"}` is `1`. In Grafana, use your existing Prometheus data source and query:
 
 - `network_ping_success` — `1` means reachable and `0` means unreachable.
-- `network_ping_duration_seconds` — most recent successful ping's round-trip latency in seconds; multiply by 1000 for milliseconds.
-- `network_ping_packet_loss_ratio` — packet loss from the most recent ping check only, from `0` (no loss) to `1` (all packets lost). The ping summary's sent and received packet counts are used; a failed ping with no reply reports `1`.
+- `network_ping_duration_seconds * 1000` — latest successful ping latency in milliseconds.
+- `network_ping_packet_loss_ratio * 100` — packet loss percentage for the latest ping check.
 
-The exporter itself exposes these three live values at <http://localhost:8080/metrics>. Prometheus scrapes it every second and the web page refreshes its latest-check table every second. In Grafana, set dashboard refresh to **1s** and use these queries:
+Set the Grafana dashboard refresh to 1 second for near-live updates. Prometheus stores scraped samples as history; the exporter values themselves always represent the latest completed check.
 
-- Latency in milliseconds: `network_ping_duration_seconds * 1000`
-- Latest ping status: `network_ping_success`
-- Packet loss percentage for the latest ping: `network_ping_packet_loss_ratio * 100`
+The configuration page accepts one IP address or hostname per line. **Schedule** is the interval in seconds between rounds (default: 1 second); **delay** is the pause between targets (default: 0); **timeout** is the reply wait per packet (default: 1000ms); **packets per ping check** is the number of ICMP echo requests per target (default: 5, allowed: 1–20). Five packets give loss readings in 20% increments. Settings are persisted in the Docker volume.
 
-Each new ping replaces the previous values; none of these metrics are cumulative. Prometheus stores each scrape as a time series so Grafana can display their history. Updates happen on the ping and scrape intervals, so they are near-live rather than instantaneous. Packet counts depend on the host's `ping` command summary format.
-
-The web page and configuration API have no authentication. Keep the ports on a trusted network; do not expose them directly to the public internet. You can change the published ports in `compose.yaml`.
-
-To run only the exporter, use `docker compose up --build network-stats-exporter`. To remove the containers while retaining settings and metric history, use `docker compose down`; `docker compose down -v` also deletes persisted data.
+The web page and configuration API have no authentication. Keep the exporter on a trusted network and do not expose port 8080 directly to the public internet.
 
 ## Build and publish
 
@@ -40,13 +42,13 @@ To run only the exporter, use `docker compose up --build network-stats-exporter`
 
 The first GHCR publication may create a private package. In GitHub, open the repository's **Packages** settings and change the package visibility to **Public** to allow unauthenticated pulls.
 
-After publication, replace `build: .` in the exporter service in `compose.yaml` with:
+To run the published image, replace `build: .` and `image: network-stats-exporter:local` in `compose.yaml` with:
 
 ```yaml
 image: ghcr.io/untalturner/network-stats-exporter:latest
 ```
 
-and remove the `build: .` line. The image is Linux-based and built for amd64 and arm64 hosts. It includes the ping utility and grants that utility only the raw-socket capability needed for ICMP; no elevated container privilege is required.
+The image includes its own ping utility and supports Linux amd64 and arm64 hosts.
 
 ## Test and build without Docker
 
@@ -58,4 +60,4 @@ go vet ./...
 go build .
 ```
 
-Run the binary with `CONFIG_PATH=./data/config.json` to persist settings locally (`CONFIG_PATH` defaults to `/data/config.json` for the container), then open <http://localhost:8080>. The host must have a `ping` command available. The Docker image includes its own ping utility.
+Run the binary with `CONFIG_PATH=./data/config.json` to persist settings locally (`CONFIG_PATH` defaults to `/data/config.json` in the container). The host must have a `ping` command available.
