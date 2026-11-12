@@ -18,13 +18,15 @@ func TestValidateConfig(t *testing.T) {
 		config  Config
 		wantErr bool
 	}{
-		{name: "valid IPv4 and hostname", config: Config{Targets: []string{"1.1.1.1", "example.com"}, ScheduleSeconds: 30, DelayMilliseconds: 10, TimeoutMilliseconds: 1000}},
+		{name: "valid IPv4 and hostname", config: Config{Targets: []Target{{Address: "1.1.1.1", Type: "external"}, {Address: "example.com", Type: "local"}}, ScheduleSeconds: 30, DelayMilliseconds: 10, TimeoutMilliseconds: 1000}},
 		{name: "no targets", config: Config{ScheduleSeconds: 30, TimeoutMilliseconds: 1000}, wantErr: true},
-		{name: "invalid target", config: Config{Targets: []string{"--help"}, ScheduleSeconds: 30, TimeoutMilliseconds: 1000}, wantErr: true},
-		{name: "invalid hostname labels", config: Config{Targets: []string{"a..b"}, ScheduleSeconds: 30, TimeoutMilliseconds: 1000}, wantErr: true},
-		{name: "schedule out of range", config: Config{Targets: []string{"localhost"}, ScheduleSeconds: 0, TimeoutMilliseconds: 1000}, wantErr: true},
-		{name: "timeout out of range", config: Config{Targets: []string{"localhost"}, ScheduleSeconds: 1, TimeoutMilliseconds: 99}, wantErr: true},
-		{name: "packet count out of range", config: Config{Targets: []string{"localhost"}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, PacketsPerPing: -1}, wantErr: true},
+		{name: "invalid target", config: Config{Targets: []Target{{Address: "--help", Type: "local"}}, ScheduleSeconds: 30, TimeoutMilliseconds: 1000}, wantErr: true},
+		{name: "invalid hostname labels", config: Config{Targets: []Target{{Address: "a..b", Type: "local"}}, ScheduleSeconds: 30, TimeoutMilliseconds: 1000}, wantErr: true},
+		{name: "invalid target type", config: Config{Targets: []Target{{Address: "localhost", Type: "lan network"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000}, wantErr: true},
+		{name: "missing target type", config: Config{Targets: []Target{{Address: "localhost"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000}, wantErr: true},
+		{name: "schedule out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 0, TimeoutMilliseconds: 1000}, wantErr: true},
+		{name: "timeout out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 99}, wantErr: true},
+		{name: "packet count out of range", config: Config{Targets: []Target{{Address: "localhost", Type: "local"}}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, PacketsPerPing: -1}, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -63,7 +65,7 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 		t.Fatalf("default packets per ping = %d, want 5", defaults.PacketsPerPing)
 	}
 
-	body := `{"targets":["localhost"],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7}`
+	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7}`
 	put := httptest.NewRecorder()
 	app.routes().ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
 	if put.Code != http.StatusOK {
@@ -73,7 +75,7 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.Targets[0] != "localhost" || persisted.ScheduleSeconds != 15 ||
+	if persisted.Targets[0] != (Target{Address: "localhost", Type: "local"}) || persisted.ScheduleSeconds != 15 ||
 		persisted.DelayMilliseconds != 25 || persisted.TimeoutMilliseconds != 500 || persisted.PacketsPerPing != 7 {
 		t.Fatalf("persisted configuration = %+v", persisted)
 	}
@@ -89,8 +91,8 @@ func TestLoadConfigDefaultsPacketsForOlderConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.PacketsPerPing != 5 {
-		t.Fatalf("packets per ping = %d, want migrated default 5", config.PacketsPerPing)
+	if config.PacketsPerPing != 5 || config.Targets[0].Type != "default" {
+		t.Fatalf("legacy config migrated to packets=%d, target type=%q; want 5 and default", config.PacketsPerPing, config.Targets[0].Type)
 	}
 }
 
@@ -104,6 +106,8 @@ func TestConfigAPIRejectsInvalidAndUnknownFields(t *testing.T) {
 		`{"targets":["localhost"],"schedule_seconds":0,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5}`,
 		`{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":21}`,
 		`{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5,"extra":true}`,
+		`{"targets":[{"address":"localhost","type":"local","extra":true}],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5}`,
+		`{"targets":[{"address":"localhost","type":"bad type"}],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5}`,
 	} {
 		response := httptest.NewRecorder()
 		app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
@@ -120,6 +124,7 @@ func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.mu.Lock()
+	app.config.Targets = []Target{{Address: "1.1.1.1", Type: "external"}}
 	app.results["1.1.1.1"] = ProbeResult{
 		Success: true, Duration: 12 * time.Millisecond, PacketsSent: 2, PacketsReceived: 1,
 	}
@@ -128,9 +133,9 @@ func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	for _, expected := range []string{
-		`network_ping_success{target="1.1.1.1"} 1`,
-		`network_ping_duration_seconds{target="1.1.1.1"} 0.012`,
-		`network_ping_packet_loss_ratio{target="1.1.1.1"} 0.5`,
+		`network_ping_success{target="1.1.1.1",type="external"} 1`,
+		`network_ping_duration_seconds{target="1.1.1.1",type="external"} 0.012`,
+		`network_ping_packet_loss_ratio{target="1.1.1.1",type="external"} 0.5`,
 	} {
 		if !strings.Contains(response.Body.String(), expected) {
 			t.Errorf("metrics missing %q:\n%s", expected, response.Body.String())
@@ -142,10 +147,10 @@ func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 	app.mu.Unlock()
 	response = httptest.NewRecorder()
 	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if strings.Contains(response.Body.String(), `network_ping_duration_seconds{target="1.1.1.1"}`) {
+	if strings.Contains(response.Body.String(), `network_ping_duration_seconds{target="1.1.1.1",type="external"}`) {
 		t.Error("latency metric should be omitted when the latest ping failed")
 	}
-	if !strings.Contains(response.Body.String(), `network_ping_packet_loss_ratio{target="1.1.1.1"} 1`) {
+	if !strings.Contains(response.Body.String(), `network_ping_packet_loss_ratio{target="1.1.1.1",type="external"} 1`) {
 		t.Error("packet loss should reflect the latest failed ping, not prior successful pings")
 	}
 	if strings.Contains(response.Body.String(), "_total") {
@@ -160,7 +165,7 @@ func TestWorkerUsesConfiguredTargetsAndTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.config = Config{
-		Targets:             []string{"first.example", "second.example"},
+		Targets:             []Target{{Address: "first.example", Type: "local"}, {Address: "second.example", Type: "external"}},
 		ScheduleSeconds:     60,
 		DelayMilliseconds:   0,
 		TimeoutMilliseconds: 750,
@@ -216,7 +221,7 @@ func TestWorkerHonorsDelayBetweenTargetsAndScheduleBetweenRounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.config = Config{
-		Targets:             []string{"first.example", "second.example"},
+		Targets:             []Target{{Address: "first.example", Type: "local"}, {Address: "second.example", Type: "external"}},
 		ScheduleSeconds:     1,
 		DelayMilliseconds:   40,
 		TimeoutMilliseconds: 750,
@@ -276,6 +281,8 @@ func TestIndexServesConfigurationPage(t *testing.T) {
 	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Save configuration") ||
 		!strings.Contains(response.Body.String(), "packets_per_ping") ||
+		!strings.Contains(response.Body.String(), "Add target") ||
+		!strings.Contains(response.Body.String(), "remove-target") ||
 		strings.Contains(response.Body.String(), "prometheus_url") ||
 		strings.Contains(response.Body.String(), "grafana_url") {
 		t.Fatalf("unexpected page response: status=%d body=%q", response.Code, response.Body.String())

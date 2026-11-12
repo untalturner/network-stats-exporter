@@ -109,8 +109,8 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# HELP network_ping_packet_loss_ratio Fraction of ICMP echo requests lost in the most recent ping check; 1 means no reply.")
 	fmt.Fprintln(w, "# TYPE network_ping_packet_loss_ratio gauge")
 	for _, target := range a.config.Targets {
-		labels := `target="` + escapeLabel(target) + `"`
-		result, ok := a.results[target]
+		labels := `target="` + escapeLabel(target.Address) + `",type="` + escapeLabel(target.Type) + `"`
+		result, ok := a.results[target.Address]
 		if !ok {
 			continue
 		}
@@ -140,7 +140,7 @@ func (a *App) run(ctx context.Context) {
 	for {
 		a.mu.RLock()
 		config := Config{
-			Targets:             append([]string(nil), a.config.Targets...),
+			Targets:             append([]Target(nil), a.config.Targets...),
 			ScheduleSeconds:     a.config.ScheduleSeconds,
 			DelayMilliseconds:   a.config.DelayMilliseconds,
 			TimeoutMilliseconds: a.config.TimeoutMilliseconds,
@@ -150,9 +150,9 @@ func (a *App) run(ctx context.Context) {
 
 		started := time.Now()
 		for i, target := range config.Targets {
-			result := a.probe(ctx, target, time.Duration(config.TimeoutMilliseconds)*time.Millisecond, config.PacketsPerPing)
+			result := a.probe(ctx, target.Address, time.Duration(config.TimeoutMilliseconds)*time.Millisecond, config.PacketsPerPing)
 			a.mu.Lock()
-			a.results[target] = result
+			a.results[target.Address] = result
 			a.mu.Unlock()
 
 			if i < len(config.Targets)-1 && config.DelayMilliseconds > 0 {

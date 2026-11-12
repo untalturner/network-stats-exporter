@@ -29,10 +29,11 @@ Replace the placeholder with the TrueNAS address and published exporter port, th
 - `network_ping_success` — `1` means reachable and `0` means unreachable.
 - `network_ping_duration_seconds * 1000` — latest successful ping latency in milliseconds.
 - `network_ping_packet_loss_ratio * 100` — packet loss percentage for the latest ping check.
+- Every ping metric includes `target` and `type` labels. For example, `avg by (type) (network_ping_duration_seconds)` shows average latest successful latency per target type (in seconds); multiply by `1000` for milliseconds.
 
 Set the Grafana dashboard refresh to 1 second for near-live updates. Prometheus stores scraped samples as history; the exporter values themselves always represent the latest completed check.
 
-The configuration page accepts one IP address or hostname per line. **Schedule** is the interval in seconds between rounds (default: 1 second); **delay** is the pause between targets (default: 0); **timeout** is the reply wait per packet (default: 1000ms); **packets per ping check** is the number of ICMP echo requests per target (default: 5, allowed: 1–20). Five packets give loss readings in 20% increments. Settings are persisted in the Docker volume.
+In the configuration page, add targets by address and assign each a type such as `local` or `external`. Types must start with a letter and contain only letters, numbers, underscores, or hyphens (up to 32 characters). Edit or remove targets in the table, then save the configuration to apply changes. **Schedule** is the interval in seconds between rounds (default: 1 second); **delay** is the pause between targets (default: 0); **timeout** is the reply wait per packet (default: 1000ms); **packets per ping check** is the number of ICMP echo requests per target (default: 5, allowed: 1–20). Five packets give loss readings in 20% increments. Settings are persisted in the Docker volume.
 
 The web page and configuration API have no authentication. Keep the exporter on a trusted network and do not expose port 8080 directly to the public internet.
 

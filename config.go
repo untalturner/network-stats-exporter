@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -10,8 +11,34 @@ import (
 	"strings"
 )
 
+type Target struct {
+	Address string `json:"address"`
+	Type    string `json:"type"`
+}
+
+func (t *Target) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		var address string
+		if err := json.Unmarshal(data, &address); err != nil {
+			return err
+		}
+		*t = Target{Address: address, Type: "default"}
+		return nil
+	}
+
+	type targetFields Target
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var fields targetFields
+	if err := decoder.Decode(&fields); err != nil {
+		return err
+	}
+	*t = Target(fields)
+	return nil
+}
+
 type Config struct {
-	Targets             []string `json:"targets"`
+	Targets             []Target `json:"targets"`
 	ScheduleSeconds     int      `json:"schedule_seconds"`
 	DelayMilliseconds   int      `json:"delay_milliseconds"`
 	TimeoutMilliseconds int      `json:"timeout_milliseconds"`
@@ -20,7 +47,7 @@ type Config struct {
 
 func defaultConfig() Config {
 	return Config{
-		Targets:             []string{"1.1.1.1", "8.8.8.8"},
+		Targets:             []Target{{Address: "1.1.1.1", Type: "external"}, {Address: "8.8.8.8", Type: "external"}},
 		ScheduleSeconds:     1,
 		DelayMilliseconds:   0,
 		TimeoutMilliseconds: 1000,
@@ -29,6 +56,7 @@ func defaultConfig() Config {
 }
 
 var hostnamePattern = regexp.MustCompile(`(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?$`)
+var targetTypePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,31}$`)
 
 func validateConfig(config Config) (Config, error) {
 	if config.PacketsPerPing == 0 {
@@ -38,12 +66,16 @@ func validateConfig(config Config) (Config, error) {
 		return Config{}, fmt.Errorf("provide between 1 and 50 targets")
 	}
 	for i, target := range config.Targets {
-		target = strings.TrimSpace(target)
-		if target == "" || len(target) > 253 || strings.ContainsAny(target, "\r\n\t ") {
+		target.Address = strings.TrimSpace(target.Address)
+		target.Type = strings.TrimSpace(target.Type)
+		if target.Address == "" || len(target.Address) > 253 || strings.ContainsAny(target.Address, "\r\n\t ") {
 			return Config{}, fmt.Errorf("target %d is empty or invalid", i+1)
 		}
-		if net.ParseIP(target) == nil && !hostnamePattern.MatchString(target) {
-			return Config{}, fmt.Errorf("target %q must be an IP address or hostname", target)
+		if net.ParseIP(target.Address) == nil && !hostnamePattern.MatchString(target.Address) {
+			return Config{}, fmt.Errorf("target %q must be an IP address or hostname", target.Address)
+		}
+		if !targetTypePattern.MatchString(target.Type) {
+			return Config{}, fmt.Errorf("target %d type must start with a letter and contain only letters, numbers, underscores, or hyphens (up to 32 characters)", i+1)
 		}
 		config.Targets[i] = target
 	}
