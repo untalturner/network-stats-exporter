@@ -42,7 +42,7 @@ const page = `<!doctype html>
     <p id="message" role="status"></p>
   </form>
   <h2>Latest checks</h2>
-  <table><thead><tr><th>Target</th><th>Type</th><th>Status</th><th>Latency</th><th>Packet loss</th></tr></thead><tbody id="results"></tbody></table>
+  <table><thead><tr><th>Target</th><th>Type</th><th>Status</th><th>Latency</th><th>Jitter</th><th>Packet loss</th></tr></thead><tbody id="results"></tbody></table>
   <script>
     const form = document.querySelector("#config");
     const message = document.querySelector("#message");
@@ -115,15 +115,18 @@ const page = `<!doctype html>
       }
       const success = valuesFor("network_ping_success");
       const latency = valuesFor("network_ping_duration_seconds");
+      const jitter = valuesFor("network_ping_jitter_seconds");
       const packetLoss = valuesFor("network_ping_packet_loss_ratio");
       document.querySelector("#results").innerHTML = readTargets().map((target) => {
         const ok = success.has(target.address) ? success.get(target.address) === 1 : undefined;
         const status = ok === undefined ? "Waiting for first check" : ok ? "Reachable" : "Unreachable";
         const ms = latency.has(target.address) ? (latency.get(target.address) * 1000).toFixed(2) + " ms" : "—";
+        const jitterMs = jitter.has(target.address) ? (jitter.get(target.address) * 1000).toFixed(2) + " ms" : "—";
         const loss = packetLoss.has(target.address) ? (packetLoss.get(target.address) * 100).toFixed(0) + "%" : "—";
         const statusClass = ok === true ? "ok" : ok === false ? "bad" : "";
         return "<tr><td>" + escapeHTML(target.address) + "</td><td>" + escapeHTML(target.type)
           + "</td><td class='" + statusClass + "'>" + escapeHTML(status) + "</td><td>" + escapeHTML(ms) + "</td><td>"
+          + escapeHTML(jitterMs) + "</td><td>"
           + escapeHTML(loss) + "</td></tr>";
       }).join("");
     }

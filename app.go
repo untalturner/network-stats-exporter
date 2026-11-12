@@ -14,6 +14,8 @@ import (
 type ProbeResult struct {
 	Success         bool
 	Duration        time.Duration
+	Jitter          time.Duration
+	JitterAvailable bool
 	PacketsSent     uint64
 	PacketsReceived uint64
 }
@@ -120,6 +122,8 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# TYPE network_ping_success gauge")
 	fmt.Fprintln(w, "# HELP network_ping_duration_seconds Round-trip latency of the most recent successful ping.")
 	fmt.Fprintln(w, "# TYPE network_ping_duration_seconds gauge")
+	fmt.Fprintln(w, "# HELP network_ping_jitter_seconds Mean absolute difference between consecutive packet RTTs in the most recent ping check.")
+	fmt.Fprintln(w, "# TYPE network_ping_jitter_seconds gauge")
 	fmt.Fprintln(w, "# HELP network_ping_packet_loss_ratio Fraction of ICMP echo requests lost in the most recent ping check; 1 means no reply.")
 	fmt.Fprintln(w, "# TYPE network_ping_packet_loss_ratio gauge")
 	for _, target := range a.config.Targets {
@@ -135,6 +139,9 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, "network_ping_success{%s} %d\n", labels, success)
 		if result.Success {
 			fmt.Fprintf(w, "network_ping_duration_seconds{%s} %g\n", labels, result.Duration.Seconds())
+		}
+		if result.JitterAvailable {
+			fmt.Fprintf(w, "network_ping_jitter_seconds{%s} %g\n", labels, result.Jitter.Seconds())
 		}
 		lossRatio := 1.0
 		if result.PacketsSent > 0 {

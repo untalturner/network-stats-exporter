@@ -187,7 +187,8 @@ func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 	app.mu.Lock()
 	app.config.Targets = []Target{{Address: "1.1.1.1", Type: "external"}}
 	app.results["1.1.1.1"] = ProbeResult{
-		Success: true, Duration: 12 * time.Millisecond, PacketsSent: 2, PacketsReceived: 1,
+		Success: true, Duration: 12 * time.Millisecond, Jitter: 4 * time.Millisecond,
+		JitterAvailable: true, PacketsSent: 2, PacketsReceived: 1,
 	}
 	app.mu.Unlock()
 
@@ -196,6 +197,7 @@ func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 	for _, expected := range []string{
 		`network_ping_success{target="1.1.1.1",type="external"} 1`,
 		`network_ping_duration_seconds{target="1.1.1.1",type="external"} 0.012`,
+		`network_ping_jitter_seconds{target="1.1.1.1",type="external"} 0.004`,
 		`network_ping_packet_loss_ratio{target="1.1.1.1",type="external"} 0.5`,
 	} {
 		if !strings.Contains(response.Body.String(), expected) {
@@ -210,6 +212,9 @@ func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if strings.Contains(response.Body.String(), `network_ping_duration_seconds{target="1.1.1.1",type="external"}`) {
 		t.Error("latency metric should be omitted when the latest ping failed")
+	}
+	if strings.Contains(response.Body.String(), `network_ping_jitter_seconds{target="1.1.1.1",type="external"}`) {
+		t.Error("jitter metric should be omitted when there are not two consecutive replies")
 	}
 	if !strings.Contains(response.Body.String(), `network_ping_packet_loss_ratio{target="1.1.1.1",type="external"} 1`) {
 		t.Error("packet loss should reflect the latest failed ping, not prior successful pings")
@@ -343,6 +348,8 @@ func TestIndexServesConfigurationPage(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Save configuration") ||
 		!strings.Contains(response.Body.String(), "packets_per_ping") ||
 		!strings.Contains(response.Body.String(), "Reset to defaults") ||
+		!strings.Contains(response.Body.String(), "network_ping_jitter_seconds") ||
+		!strings.Contains(response.Body.String(), "<th>Jitter</th>") ||
 		!strings.Contains(response.Body.String(), "Add target") ||
 		!strings.Contains(response.Body.String(), "remove-target") ||
 		strings.Contains(response.Body.String(), "prometheus_url") ||

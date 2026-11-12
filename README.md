@@ -28,6 +28,7 @@ Replace the placeholder with the TrueNAS address and published exporter port, th
 
 - `network_ping_success` — `1` means reachable and `0` means unreachable.
 - `network_ping_duration_seconds * 1000` — latest successful ping latency in milliseconds.
+- `network_ping_jitter_seconds * 1000` — mean absolute change in RTT between consecutive successful packets in the latest check, in milliseconds. It is omitted if fewer than two consecutive packets reply.
 - `network_ping_packet_loss_ratio * 100` — packet loss percentage for the latest ping check.
 - Every ping metric includes `target` and `type` labels. For example, `avg by (type) (network_ping_duration_seconds)` shows average latest successful latency per target type (in seconds); multiply by `1000` for milliseconds.
 

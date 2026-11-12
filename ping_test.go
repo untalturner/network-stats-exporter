@@ -12,7 +12,7 @@ import (
 func TestPingHostParsesSuccessfulPing(t *testing.T) {
 	dir := t.TempDir()
 	pingPath := filepath.Join(dir, "ping")
-	script := "#!/bin/sh\nprintf '%s\\n' '64 bytes from test: icmp_seq=1 ttl=64 time=1.25 ms' '3 packets transmitted, 3 received, 0% packet loss, time 0ms'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' '64 bytes from test: icmp_seq=1 ttl=64 time=1.25 ms' '64 bytes from test: icmp_seq=2 ttl=64 time=2.25 ms' '64 bytes from test: icmp_seq=3 ttl=64 time=0.25 ms' '3 packets transmitted, 3 received, 0% packet loss, time 0ms'\n"
 	if err := os.WriteFile(pingPath, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -25,8 +25,57 @@ func TestPingHostParsesSuccessfulPing(t *testing.T) {
 	if result.Duration != 1250*time.Microsecond {
 		t.Fatalf("duration = %s, want 1.25ms", result.Duration)
 	}
+	if !result.JitterAvailable || result.Jitter != 1500*time.Microsecond {
+		t.Fatalf("jitter = %s (available %t), want 1.5ms", result.Jitter, result.JitterAvailable)
+	}
 	if result.PacketsSent != 3 || result.PacketsReceived != 3 {
 		t.Fatalf("packet counts = sent %d received %d, want 3 and 3", result.PacketsSent, result.PacketsReceived)
+	}
+}
+
+func TestParsePingRTTsAndCalculateJitter(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		want      time.Duration
+		available bool
+	}{
+		{
+			name:      "varying consecutive replies",
+			output:    "reply icmp_seq=1 time=10 ms\nreply icmp_seq=2 time=20 ms\nreply icmp_seq=3 time=15 ms",
+			want:      7500 * time.Microsecond,
+			available: true,
+		},
+		{
+			name:      "stable replies",
+			output:    "reply icmp_seq=1 time=10 ms\nreply icmp_seq=2 time=10 ms\nreply icmp_seq=3 time=10 ms",
+			want:      0,
+			available: true,
+		},
+		{
+			name:      "does not bridge a missing sequence",
+			output:    "reply icmp_seq=1 time=10 ms\nreply icmp_seq=2 time=20 ms\nreply icmp_seq=4 time=40 ms\nreply icmp_seq=5 time=60 ms",
+			want:      15 * time.Millisecond,
+			available: true,
+		},
+		{
+			name:      "windows timeout separates replies",
+			output:    "Reply from 192.0.2.1: time=10ms\nRequest timed out.\nReply from 192.0.2.1: time=40ms",
+			available: false,
+		},
+		{
+			name:      "one reply has no jitter",
+			output:    "reply icmp_seq=1 time=10 ms",
+			available: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, available := calculatePingJitter(parsePingRTTs([]byte(test.output)))
+			if got != test.want || available != test.available {
+				t.Fatalf("jitter = %s (available %t), want %s (available %t)", got, available, test.want, test.available)
+			}
+		})
 	}
 }
 
