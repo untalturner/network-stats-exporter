@@ -38,6 +38,7 @@ const page = `<!doctype html>
       <div><label for="packets">Packets per ping check (1–20)</label><input id="packets" type="number" min="1" max="20" required></div>
     </div>
     <button type="submit">Save configuration</button>
+    <button id="reset-config" type="button">Reset to defaults</button>
     <p id="message" role="status"></p>
   </form>
   <h2>Latest checks</h2>
@@ -59,20 +60,32 @@ const page = `<!doctype html>
         type: row.querySelector(".target-type").value.trim()
       })).filter((target) => target.address);
     }
-    document.querySelector("#add-target").addEventListener("click", () => addTargetRow());
-    targetList.addEventListener("click", (event) => {
-      if (event.target.closest(".remove-target")) event.target.closest("tr").remove();
-    });
-    async function loadConfig() {
-      const response = await fetch("/api/config");
-      if (!response.ok) throw new Error("Could not load configuration");
-      const config = await response.json();
+    function renderConfig(config) {
       targetList.replaceChildren();
       config.targets.forEach(addTargetRow);
       document.querySelector("#schedule").value = config.schedule_seconds;
       document.querySelector("#delay").value = config.delay_milliseconds;
       document.querySelector("#timeout").value = config.timeout_milliseconds;
       document.querySelector("#packets").value = config.packets_per_ping;
+    }
+    document.querySelector("#add-target").addEventListener("click", () => addTargetRow());
+    targetList.addEventListener("click", (event) => {
+      if (event.target.closest(".remove-target")) event.target.closest("tr").remove();
+    });
+    document.querySelector("#reset-config").addEventListener("click", async () => {
+      if (!confirm("Reset all ping settings and targets to defaults?")) return;
+      message.textContent = "Resetting configuration…";
+      try {
+        const response = await fetch("/api/config/reset", {method: "POST"});
+        if (!response.ok) throw new Error(await response.text());
+        renderConfig(await response.json());
+        message.textContent = "Configuration reset to defaults and saved.";
+      } catch (error) { message.textContent = error.message; }
+    });
+    async function loadConfig() {
+      const response = await fetch("/api/config");
+      if (!response.ok) throw new Error("Could not load configuration");
+      renderConfig(await response.json());
     }
     form.addEventListener("submit", async (event) => {
       event.preventDefault();

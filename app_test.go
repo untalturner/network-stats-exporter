@@ -81,6 +81,67 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 	}
 }
 
+func TestConfigResetRestoresAndPersistsDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	app, err := NewApp(path, func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7}`
+	put := httptest.NewRecorder()
+	app.routes().ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %q", put.Code, put.Body.String())
+	}
+
+	reset := httptest.NewRecorder()
+	app.routes().ServeHTTP(reset, httptest.NewRequest(http.MethodPost, "/api/config/reset", nil))
+	if reset.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, body = %q", reset.Code, reset.Body.String())
+	}
+	var response Config
+	if err := json.Unmarshal(reset.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	want := defaultConfig()
+	if len(response.Targets) != len(want.Targets) || response.Targets[0] != want.Targets[0] ||
+		response.ScheduleSeconds != want.ScheduleSeconds || response.DelayMilliseconds != want.DelayMilliseconds ||
+		response.TimeoutMilliseconds != want.TimeoutMilliseconds || response.PacketsPerPing != want.PacketsPerPing {
+		t.Fatalf("reset response = %+v, want defaults %+v", response, want)
+	}
+	persisted, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Targets[0] != want.Targets[0] || persisted.ScheduleSeconds != want.ScheduleSeconds {
+		t.Fatalf("persisted reset configuration = %+v, want defaults %+v", persisted, want)
+	}
+}
+
+func TestConfigSaveReturnsFilesystemError(t *testing.T) {
+	dir := t.TempDir()
+	blockedDir := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blockedDir, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		configPath: filepath.Join(blockedDir, "config.json"),
+		config:     defaultConfig(),
+	}
+	body := `{"targets":[{"address":"localhost","type":"local"}],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7}`
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
+	if response.Code != http.StatusInternalServerError ||
+		!strings.Contains(response.Body.String(), "save configuration to") ||
+		!strings.Contains(response.Body.String(), "writable by the exporter") {
+		t.Fatalf("save failure response = status %d, body %q", response.Code, response.Body.String())
+	}
+	if app.config.ScheduleSeconds != defaultConfig().ScheduleSeconds {
+		t.Fatal("in-memory config changed after persistence failed")
+	}
+}
+
 func TestLoadConfigDefaultsPacketsForOlderConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	legacy := `{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"prometheus_url":"http://old-host:9090","grafana_url":"http://old-host:3000"}`
@@ -281,6 +342,7 @@ func TestIndexServesConfigurationPage(t *testing.T) {
 	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Save configuration") ||
 		!strings.Contains(response.Body.String(), "packets_per_ping") ||
+		!strings.Contains(response.Body.String(), "Reset to defaults") ||
 		!strings.Contains(response.Body.String(), "Add target") ||
 		!strings.Contains(response.Body.String(), "remove-target") ||
 		strings.Contains(response.Body.String(), "prometheus_url") ||

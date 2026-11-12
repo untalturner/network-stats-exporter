@@ -46,6 +46,7 @@ func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
 	mux.HandleFunc("/api/config", a.handleConfig)
+	mux.HandleFunc("/api/config/reset", a.handleConfigReset)
 	mux.HandleFunc("/metrics", a.handleMetrics)
 	return mux
 }
@@ -84,18 +85,31 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if err := saveConfig(a.configPath, config); err != nil {
-			http.Error(w, "save configuration failed", http.StatusInternalServerError)
-			return
-		}
-		a.config = config
-		writeJSON(w, http.StatusOK, config)
+		a.saveConfiguration(w, config)
 	default:
 		w.Header().Set("Allow", "GET, PUT, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *App) handleConfigReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	a.saveConfiguration(w, defaultConfig())
+}
+
+func (a *App) saveConfiguration(w http.ResponseWriter, config Config) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := saveConfig(a.configPath, config); err != nil {
+		http.Error(w, fmt.Sprintf("save configuration to %q failed: %v; ensure the mounted /data directory is writable by the exporter", a.configPath, err), http.StatusInternalServerError)
+		return
+	}
+	a.config = config
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
