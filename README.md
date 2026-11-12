@@ -14,15 +14,21 @@ docker compose up --build
 - Prometheus is available at <http://localhost:9090>.
 - Grafana is available at <http://localhost:3000> (default login: `admin` / `admin`; Grafana asks you to change the password).
 
-The page accepts one target per line. **Schedule** is the interval in seconds between rounds; **delay** is the pause in milliseconds between targets within a round; **timeout** is the maximum time in milliseconds for each ping. The first round starts as soon as the exporter starts. Settings are saved to the `exporter-data` volume and survive container recreation. A changed schedule takes effect after the current round.
+The page accepts one target per line. **Schedule** is the interval in seconds between rounds (default: 1 second); **delay** is the pause in milliseconds between targets within a round (default: 0); **timeout** is the maximum reply wait in milliseconds per packet (default: 1000); **packets per ping check** is the number of ICMP echo requests sent to each target per round (default: 5, allowed: 1–20). Five packets provide 20% loss increments for each check. On Linux and macOS they are sent 200ms apart. The first round starts as soon as the exporter starts. Settings are saved to the `exporter-data` volume and survive container recreation; existing saved configs receive the default packet count. A changed schedule takes effect after the current round. Probes run serially, so many slow or unreachable targets can make a round take longer than its schedule.
 
 In Grafana, add a Prometheus data source with URL `http://prometheus:9090` if it is not already configured, then use Explore to query:
 
 - `network_ping_success` — `1` means reachable and `0` means unreachable.
-- `network_ping_duration_seconds` — most recent ping duration in seconds.
-- `network_ping_checks_total` — check counts grouped by `target` and `result`.
+- `network_ping_duration_seconds` — most recent successful ping's round-trip latency in seconds; multiply by 1000 for milliseconds.
+- `network_ping_packet_loss_ratio` — packet loss from the most recent ping check only, from `0` (no loss) to `1` (all packets lost). The ping summary's sent and received packet counts are used; a failed ping with no reply reports `1`.
 
-The exporter itself exposes these at <http://localhost:8080/metrics>. Prometheus scrapes it every 15 seconds. The web page refreshes its latest-check table every 5 seconds.
+The exporter itself exposes these three live values at <http://localhost:8080/metrics>. Prometheus scrapes it every second and the web page refreshes its latest-check table every second. In Grafana, set dashboard refresh to **1s** and use these queries:
+
+- Latency in milliseconds: `network_ping_duration_seconds * 1000`
+- Latest ping status: `network_ping_success`
+- Packet loss percentage for the latest ping: `network_ping_packet_loss_ratio * 100`
+
+Each new ping replaces the previous values; none of these metrics are cumulative. Prometheus stores each scrape as a time series so Grafana can display their history. Updates happen on the ping and scrape intervals, so they are near-live rather than instantaneous. Packet counts depend on the host's `ping` command summary format.
 
 The web page and configuration API have no authentication. Keep the ports on a trusted network; do not expose them directly to the public internet. You can change the published ports in `compose.yaml`.
 

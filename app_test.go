@@ -24,6 +24,7 @@ func TestValidateConfig(t *testing.T) {
 		{name: "invalid hostname labels", config: Config{Targets: []string{"a..b"}, ScheduleSeconds: 30, TimeoutMilliseconds: 1000}, wantErr: true},
 		{name: "schedule out of range", config: Config{Targets: []string{"localhost"}, ScheduleSeconds: 0, TimeoutMilliseconds: 1000}, wantErr: true},
 		{name: "timeout out of range", config: Config{Targets: []string{"localhost"}, ScheduleSeconds: 1, TimeoutMilliseconds: 99}, wantErr: true},
+		{name: "packet count out of range", config: Config{Targets: []string{"localhost"}, ScheduleSeconds: 1, TimeoutMilliseconds: 1000, PacketsPerPing: -1}, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -37,7 +38,7 @@ func TestValidateConfig(t *testing.T) {
 
 func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data", "config.json")
-	app, err := NewApp(path, func(context.Context, string, time.Duration) ProbeResult { return ProbeResult{} })
+	app, err := NewApp(path, func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +55,15 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 	if len(defaults.Targets) == 0 {
 		t.Fatal("default configuration has no targets")
 	}
+	if defaults.ScheduleSeconds != 1 || defaults.DelayMilliseconds != 0 {
+		t.Fatalf("default probe cadence = schedule %ds, delay %dms; want 1s and 0ms",
+			defaults.ScheduleSeconds, defaults.DelayMilliseconds)
+	}
+	if defaults.PacketsPerPing != 5 {
+		t.Fatalf("default packets per ping = %d, want 5", defaults.PacketsPerPing)
+	}
 
-	body := `{"targets":["localhost"],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500}`
+	body := `{"targets":["localhost"],"schedule_seconds":15,"delay_milliseconds":25,"timeout_milliseconds":500,"packets_per_ping":7}`
 	put := httptest.NewRecorder()
 	app.routes().ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
 	if put.Code != http.StatusOK {
@@ -66,20 +74,36 @@ func TestConfigAPIReadsAndPersistsConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if persisted.Targets[0] != "localhost" || persisted.ScheduleSeconds != 15 ||
-		persisted.DelayMilliseconds != 25 || persisted.TimeoutMilliseconds != 500 {
+		persisted.DelayMilliseconds != 25 || persisted.TimeoutMilliseconds != 500 || persisted.PacketsPerPing != 7 {
 		t.Fatalf("persisted configuration = %+v", persisted)
+	}
+}
+
+func TestLoadConfigDefaultsPacketsForOlderConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000}`
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.PacketsPerPing != 5 {
+		t.Fatalf("packets per ping = %d, want migrated default 5", config.PacketsPerPing)
 	}
 }
 
 func TestConfigAPIRejectsInvalidAndUnknownFields(t *testing.T) {
 	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
-		func(context.Context, string, time.Duration) ProbeResult { return ProbeResult{} })
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, body := range []string{
-		`{"targets":["localhost"],"schedule_seconds":0,"delay_milliseconds":0,"timeout_milliseconds":1000}`,
-		`{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"extra":true}`,
+		`{"targets":["localhost"],"schedule_seconds":0,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5}`,
+		`{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":21}`,
+		`{"targets":["localhost"],"schedule_seconds":1,"delay_milliseconds":0,"timeout_milliseconds":1000,"packets_per_ping":5,"extra":true}`,
 	} {
 		response := httptest.NewRecorder()
 		app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(body)))
@@ -91,15 +115,14 @@ func TestConfigAPIRejectsInvalidAndUnknownFields(t *testing.T) {
 
 func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
-		func(context.Context, string, time.Duration) ProbeResult { return ProbeResult{} })
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Unix(123, 0)
 	app.mu.Lock()
-	app.results["1.1.1.1"] = ProbeResult{Success: true, Duration: 12 * time.Millisecond, CheckedAt: now}
-	app.counts["1.1.1.1:success"] = 4
-	app.counts["1.1.1.1:failure"] = 2
+	app.results["1.1.1.1"] = ProbeResult{
+		Success: true, Duration: 12 * time.Millisecond, PacketsSent: 2, PacketsReceived: 1,
+	}
 	app.mu.Unlock()
 
 	response := httptest.NewRecorder()
@@ -107,19 +130,32 @@ func TestMetricsReflectLatestProbeAndCounters(t *testing.T) {
 	for _, expected := range []string{
 		`network_ping_success{target="1.1.1.1"} 1`,
 		`network_ping_duration_seconds{target="1.1.1.1"} 0.012`,
-		`network_ping_last_check_timestamp_seconds{target="1.1.1.1"} 123`,
-		`network_ping_checks_total{target="1.1.1.1",result="success"} 4`,
-		`network_ping_checks_total{target="1.1.1.1",result="failure"} 2`,
+		`network_ping_packet_loss_ratio{target="1.1.1.1"} 0.5`,
 	} {
 		if !strings.Contains(response.Body.String(), expected) {
 			t.Errorf("metrics missing %q:\n%s", expected, response.Body.String())
 		}
 	}
+
+	app.mu.Lock()
+	app.results["1.1.1.1"] = ProbeResult{PacketsSent: 1}
+	app.mu.Unlock()
+	response = httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if strings.Contains(response.Body.String(), `network_ping_duration_seconds{target="1.1.1.1"}`) {
+		t.Error("latency metric should be omitted when the latest ping failed")
+	}
+	if !strings.Contains(response.Body.String(), `network_ping_packet_loss_ratio{target="1.1.1.1"} 1`) {
+		t.Error("packet loss should reflect the latest failed ping, not prior successful pings")
+	}
+	if strings.Contains(response.Body.String(), "_total") {
+		t.Error("metrics should not expose cumulative counters")
+	}
 }
 
 func TestWorkerUsesConfiguredTargetsAndTimeout(t *testing.T) {
 	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
-		func(context.Context, string, time.Duration) ProbeResult { return ProbeResult{} })
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,15 +164,17 @@ func TestWorkerUsesConfiguredTargetsAndTimeout(t *testing.T) {
 		ScheduleSeconds:     60,
 		DelayMilliseconds:   0,
 		TimeoutMilliseconds: 750,
+		PacketsPerPing:      5,
 	}
 	type observedProbe struct {
 		target  string
 		timeout time.Duration
+		count   int
 	}
 	observed := make(chan observedProbe, 2)
-	app.probe = func(_ context.Context, target string, timeout time.Duration) ProbeResult {
-		observed <- observedProbe{target: target, timeout: timeout}
-		return ProbeResult{Success: true, Duration: time.Millisecond}
+	app.probe = func(_ context.Context, target string, timeout time.Duration, count int) ProbeResult {
+		observed <- observedProbe{target: target, timeout: timeout, count: count}
+		return ProbeResult{Success: true, Duration: time.Millisecond, PacketsSent: uint64(count), PacketsReceived: uint64(count)}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -149,8 +187,8 @@ func TestWorkerUsesConfiguredTargetsAndTimeout(t *testing.T) {
 	for _, target := range []string{"first.example", "second.example"} {
 		select {
 		case result := <-observed:
-			if result.target != target || result.timeout != 750*time.Millisecond {
-				t.Fatalf("probe = %+v, expected %s with 750ms timeout", result, target)
+			if result.target != target || result.timeout != 750*time.Millisecond || result.count != 5 {
+				t.Fatalf("probe = %+v, expected %s with 750ms timeout and 5 packets", result, target)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for configured probe")
@@ -162,11 +200,18 @@ func TestWorkerUsesConfiguredTargetsAndTimeout(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("worker did not stop after cancellation")
 	}
+	for _, target := range []string{"first.example", "second.example"} {
+		result := app.results[target]
+		if result.PacketsSent != 5 || result.PacketsReceived != 5 {
+			t.Errorf("%s latest packet stats = sent %d received %d, want 5 each",
+				target, result.PacketsSent, result.PacketsReceived)
+		}
+	}
 }
 
 func TestWorkerHonorsDelayBetweenTargetsAndScheduleBetweenRounds(t *testing.T) {
 	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
-		func(context.Context, string, time.Duration) ProbeResult { return ProbeResult{} })
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,15 +220,16 @@ func TestWorkerHonorsDelayBetweenTargetsAndScheduleBetweenRounds(t *testing.T) {
 		ScheduleSeconds:     1,
 		DelayMilliseconds:   40,
 		TimeoutMilliseconds: 750,
+		PacketsPerPing:      5,
 	}
 	type observedProbe struct {
 		target string
 		at     time.Time
 	}
 	observed := make(chan observedProbe, 4)
-	app.probe = func(_ context.Context, target string, _ time.Duration) ProbeResult {
+	app.probe = func(_ context.Context, target string, _ time.Duration, count int) ProbeResult {
 		observed <- observedProbe{target: target, at: time.Now()}
-		return ProbeResult{Success: true, Duration: time.Millisecond}
+		return ProbeResult{Success: true, Duration: time.Millisecond, PacketsSent: uint64(count), PacketsReceived: uint64(count)}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -222,13 +268,14 @@ func TestWorkerHonorsDelayBetweenTargetsAndScheduleBetweenRounds(t *testing.T) {
 
 func TestIndexServesConfigurationPage(t *testing.T) {
 	app, err := NewApp(filepath.Join(t.TempDir(), "config.json"),
-		func(context.Context, string, time.Duration) ProbeResult { return ProbeResult{} })
+		func(context.Context, string, time.Duration, int) ProbeResult { return ProbeResult{} })
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Save configuration") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Save configuration") ||
+		!strings.Contains(response.Body.String(), "packets_per_ping") {
 		t.Fatalf("unexpected page response: status=%d body=%q", response.Code, response.Body.String())
 	}
 }

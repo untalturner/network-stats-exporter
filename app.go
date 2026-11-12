@@ -12,12 +12,13 @@ import (
 )
 
 type ProbeResult struct {
-	Success   bool
-	Duration  time.Duration
-	CheckedAt time.Time
+	Success         bool
+	Duration        time.Duration
+	PacketsSent     uint64
+	PacketsReceived uint64
 }
 
-type ProbeFunc func(context.Context, string, time.Duration) ProbeResult
+type ProbeFunc func(context.Context, string, time.Duration, int) ProbeResult
 
 type App struct {
 	configPath string
@@ -26,7 +27,6 @@ type App struct {
 	mu      sync.RWMutex
 	config  Config
 	results map[string]ProbeResult
-	counts  map[string]uint64
 }
 
 func NewApp(configPath string, probe ProbeFunc) (*App, error) {
@@ -39,7 +39,6 @@ func NewApp(configPath string, probe ProbeFunc) (*App, error) {
 		probe:      probe,
 		config:     config,
 		results:    make(map[string]ProbeResult),
-		counts:     make(map[string]uint64),
 	}, nil
 }
 
@@ -105,12 +104,10 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	defer a.mu.RUnlock()
 	fmt.Fprintln(w, "# HELP network_ping_success Whether the most recent ICMP ping succeeded.")
 	fmt.Fprintln(w, "# TYPE network_ping_success gauge")
-	fmt.Fprintln(w, "# HELP network_ping_duration_seconds Duration of the most recent ping.")
+	fmt.Fprintln(w, "# HELP network_ping_duration_seconds Round-trip latency of the most recent successful ping.")
 	fmt.Fprintln(w, "# TYPE network_ping_duration_seconds gauge")
-	fmt.Fprintln(w, "# HELP network_ping_last_check_timestamp_seconds Unix timestamp of the most recent ping.")
-	fmt.Fprintln(w, "# TYPE network_ping_last_check_timestamp_seconds gauge")
-	fmt.Fprintln(w, "# HELP network_ping_checks_total Total ping checks by outcome.")
-	fmt.Fprintln(w, "# TYPE network_ping_checks_total counter")
+	fmt.Fprintln(w, "# HELP network_ping_packet_loss_ratio Fraction of ICMP echo requests lost in the most recent ping check; 1 means no reply.")
+	fmt.Fprintln(w, "# TYPE network_ping_packet_loss_ratio gauge")
 	for _, target := range a.config.Targets {
 		labels := `target="` + escapeLabel(target) + `"`
 		result, ok := a.results[target]
@@ -122,12 +119,20 @@ func (a *App) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			success = 1
 		}
 		fmt.Fprintf(w, "network_ping_success{%s} %d\n", labels, success)
-		fmt.Fprintf(w, "network_ping_duration_seconds{%s} %g\n", labels, result.Duration.Seconds())
-		fmt.Fprintf(w, "network_ping_last_check_timestamp_seconds{%s} %d\n", labels, result.CheckedAt.Unix())
-		for _, outcome := range []string{"success", "failure"} {
-			fmt.Fprintf(w, "network_ping_checks_total{%s,result=\"%s\"} %d\n",
-				labels, outcome, a.counts[target+":"+outcome])
+		if result.Success {
+			fmt.Fprintf(w, "network_ping_duration_seconds{%s} %g\n", labels, result.Duration.Seconds())
 		}
+		lossRatio := 1.0
+		if result.PacketsSent > 0 {
+			packetsLost := uint64(0)
+			if result.PacketsSent > result.PacketsReceived {
+				packetsLost = result.PacketsSent - result.PacketsReceived
+			}
+			lossRatio = float64(packetsLost) / float64(result.PacketsSent)
+		} else if result.Success {
+			lossRatio = 0
+		}
+		fmt.Fprintf(w, "network_ping_packet_loss_ratio{%s} %g\n", labels, lossRatio)
 	}
 }
 
@@ -139,20 +144,15 @@ func (a *App) run(ctx context.Context) {
 			ScheduleSeconds:     a.config.ScheduleSeconds,
 			DelayMilliseconds:   a.config.DelayMilliseconds,
 			TimeoutMilliseconds: a.config.TimeoutMilliseconds,
+			PacketsPerPing:      a.config.PacketsPerPing,
 		}
 		a.mu.RUnlock()
 
 		started := time.Now()
 		for i, target := range config.Targets {
-			result := a.probe(ctx, target, time.Duration(config.TimeoutMilliseconds)*time.Millisecond)
-			result.CheckedAt = time.Now()
+			result := a.probe(ctx, target, time.Duration(config.TimeoutMilliseconds)*time.Millisecond, config.PacketsPerPing)
 			a.mu.Lock()
 			a.results[target] = result
-			outcome := "failure"
-			if result.Success {
-				outcome = "success"
-			}
-			a.counts[target+":"+outcome]++
 			a.mu.Unlock()
 
 			if i < len(config.Targets)-1 && config.DelayMilliseconds > 0 {

@@ -15,20 +15,25 @@ type Config struct {
 	ScheduleSeconds     int      `json:"schedule_seconds"`
 	DelayMilliseconds   int      `json:"delay_milliseconds"`
 	TimeoutMilliseconds int      `json:"timeout_milliseconds"`
+	PacketsPerPing      int      `json:"packets_per_ping"`
 }
 
 func defaultConfig() Config {
 	return Config{
 		Targets:             []string{"1.1.1.1", "8.8.8.8"},
-		ScheduleSeconds:     60,
-		DelayMilliseconds:   1000,
-		TimeoutMilliseconds: 2000,
+		ScheduleSeconds:     1,
+		DelayMilliseconds:   0,
+		TimeoutMilliseconds: 1000,
+		PacketsPerPing:      5,
 	}
 }
 
 var hostnamePattern = regexp.MustCompile(`(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?$`)
 
 func validateConfig(config Config) (Config, error) {
+	if config.PacketsPerPing == 0 {
+		config.PacketsPerPing = defaultConfig().PacketsPerPing
+	}
 	if len(config.Targets) == 0 || len(config.Targets) > 50 {
 		return Config{}, fmt.Errorf("provide between 1 and 50 targets")
 	}
@@ -51,6 +56,9 @@ func validateConfig(config Config) (Config, error) {
 	if config.TimeoutMilliseconds < 100 || config.TimeoutMilliseconds > 60000 {
 		return Config{}, fmt.Errorf("timeout must be between 100 and 60000 milliseconds")
 	}
+	if config.PacketsPerPing < 1 || config.PacketsPerPing > 20 {
+		return Config{}, fmt.Errorf("packets per ping must be between 1 and 20")
+	}
 	return config, nil
 }
 
@@ -65,6 +73,13 @@ func loadConfig(path string) (Config, error) {
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return Config{}, fmt.Errorf("decode config fields: %w", err)
+	}
+	if _, exists := fields["packets_per_ping"]; !exists {
+		config.PacketsPerPing = defaultConfig().PacketsPerPing
 	}
 	return validateConfig(config)
 }
